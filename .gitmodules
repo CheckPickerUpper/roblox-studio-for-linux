@@ -1,0 +1,4 @@
+[submodule "references/vinegar"]
+	path = references/vinegar
+	url = https://github.com/vinegarhq/vinegar.git
+	branch = master

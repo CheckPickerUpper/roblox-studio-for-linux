@@ -62,6 +62,16 @@ cargo run -- doctor
 
 Rerunning `install` with a newer official installer is the update path. The default data directory is `~/.local/share/roblox-studio-linux-launcher`. Use `--config` to keep the configuration somewhere else.
 
+## Reference implementation
+
+This repository includes Vinegar as a pinned, source-only Git submodule at references/vinegar. It is the working reference for Roblox Studio installation, Wine setup, version discovery, and launching:
+
+- references/vinegar/cmd/vinegar: command entry point
+- references/vinegar/internal: configuration and platform behavior
+- references/vinegar/layer: Wine and runtime layers
+
+Vinegar is GPL-3.0 licensed. We study its behavior and reimplement the needed ideas in Rust; we do not compile or copy its code into this project.
+
 ## Desktop launcher
 
 After installing the command with Cargo, copy the template into your user application menu:
