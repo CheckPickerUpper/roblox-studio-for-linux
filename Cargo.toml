@@ -1,0 +1,9 @@
+[package]
+name = "roblox-studio-linux-launcher"
+version = "0.1.0"
+edition = "2021"
+description = "An unofficial Linux launcher for the Windows build of Roblox Studio through Wine."
+readme = "README.md"
+
+[profile.release]
+strip = true

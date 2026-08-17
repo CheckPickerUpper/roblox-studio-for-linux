@@ -18,23 +18,25 @@ Roblox officially supports Studio on Windows and macOS. This project does not pr
 Required system software:
 
 - Linux
-- Python 3.11 or newer
+- Rust stable and Cargo
 - Wine, installed through your Linux distribution
 - The official Windows Roblox Studio installer
 
-There are no third-party Python runtime dependencies. `uv` is optional, but recommended for installing the project as a command.
+The launcher uses Rust's standard library and has no third-party Rust crate dependencies.
 
 ## Install from a checkout
 
+Install the launcher command:
+
 ```bash
-uv tool install .
+cargo install --path .
 roblox-studio-linux-launcher doctor
 ```
 
-Without `uv`, run it directly from the checkout:
+During development, run it without installing:
 
 ```bash
-python3 -m roblox_studio_launcher doctor
+cargo run -- doctor
 ```
 
 ## First run
@@ -58,11 +60,11 @@ python3 -m roblox_studio_launcher doctor
    roblox-studio-linux-launcher launch
    ```
 
-The default data directory is `~/.local/share/roblox-studio-linux-launcher`. Use `--config` to keep the configuration somewhere else.
+Rerunning `install` with a newer official installer is the update path. The default data directory is `~/.local/share/roblox-studio-linux-launcher`. Use `--config` to keep the configuration somewhere else.
 
 ## Desktop launcher
 
-After installing the command with `uv`, copy the template into your user application menu:
+After installing the command with Cargo, copy the template into your user application menu:
 
 ```bash
 mkdir -p ~/.local/share/applications
@@ -70,6 +72,14 @@ cp assets/roblox-studio-linux-launcher.desktop ~/.local/share/applications/
 ```
 
 The entry opens a terminal so Wine errors remain visible while this project is experimental.
+
+## Development checks
+
+```bash
+cargo fmt --all
+cargo check --all-targets
+cargo run -- --help
+```
 
 ## Current limits
 
