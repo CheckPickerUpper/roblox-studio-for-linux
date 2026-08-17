@@ -72,6 +72,25 @@ This repository includes Vinegar as a pinned, source-only Git submodule at refer
 
 Vinegar is GPL-3.0 licensed. We study its behavior and reimplement the needed ideas in Rust; we do not compile or copy its code into this project.
 
+## Documentation and resources
+
+Roblox:
+
+- [Studio setup](https://create.roblox.com/docs/studio/setup): official supported platforms and system requirements.
+- [Studio command-line interface](https://create.roblox.com/docs/studio/command-line-interface): official launch arguments and executable locations.
+
+Linux and Wine:
+
+- [Vinegar installation guide](https://vinegarhq.org/Vinegar/Installation.html): Linux requirements and installation options.
+- [Vinegar FAQ](https://vinegarhq.org/Vinegar/FAQ/index.html): compatibility, rendering, and configuration guidance.
+- [Vinegar troubleshooting](https://vinegarhq.org/Vinegar/Troubleshooting.html): common login, graphics, prefix, and desktop-environment issues.
+- [WineHQ help](https://www.winehq.org/help): Wine documentation, FAQ, wiki, and application support resources.
+
+Rust:
+
+- [The Rust Programming Language](https://doc.rust-lang.org/book/): language guide for contributors learning Rust.
+- [The Cargo Book](https://doc.rust-lang.org/cargo/): build, run, and package this launcher.
+
 ## Desktop launcher
 
 After installing the command with Cargo, copy the template into your user application menu:
