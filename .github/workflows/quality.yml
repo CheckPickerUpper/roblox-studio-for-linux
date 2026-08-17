@@ -1,0 +1,23 @@
+name: Quality
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile source
+        run: python -m compileall -q src
+      - name: Check command help
+        run: PYTHONPATH=src python -m roblox_studio_launcher --help

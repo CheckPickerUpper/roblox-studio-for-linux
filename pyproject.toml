@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "roblox-studio-linux-launcher"
+version = "0.1.0"
+description = "An unofficial Linux launcher for the Windows build of Roblox Studio through Wine."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+roblox-studio-linux-launcher = "roblox_studio_launcher.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

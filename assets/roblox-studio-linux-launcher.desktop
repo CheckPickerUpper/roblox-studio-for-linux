@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Roblox Studio (Unofficial Linux Launcher)
+Comment=Attempt to launch Roblox Studio through Wine
+Exec=roblox-studio-linux-launcher launch
+Icon=application-x-executable
+Terminal=true
+Categories=Development;
