@@ -98,6 +98,12 @@ On WSL, use a Linux browser inside WSL for this callback path. A Windows browser
 
 If the browser was already open before registration, restart it once so it reloads the desktop application database.
 
+## Versioning
+
+`Cargo.toml` is the source of truth for the launcher version. Versions follow SemVer 2.0, including optional prerelease and build metadata identifiers.
+
+Release tags use the matching `v`-prefixed version, for example `v0.1.0` for package version `0.1.0`. CI checks both the package version and the exact tag match, so a release tag cannot point at a different version than the build metadata.
+
 ## Reference implementation
 
 This repository includes Vinegar as a pinned, source-only Git submodule at references/vinegar. It is the working reference for Roblox Studio installation, Wine setup, version discovery, and launching:

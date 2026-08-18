@@ -18,6 +18,13 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt
+      - name: Check semantic version
+        run: python3 scripts/check_semver.py
+      - name: Check release tag version
+        if: github.ref_type == 'tag'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 scripts/check_semver.py --tag "$RELEASE_TAG"
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Check compilation
