@@ -1,9 +1,12 @@
 use crate::error::LauncherError;
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
+
+const QUOTED_VALUE_DELIMITER_COUNT: usize = 2;
 
 pub(crate) fn resolve_wine_binary(configured_binary: &str) -> Option<PathBuf> {
     if configured_binary.contains('/') {
@@ -221,11 +224,14 @@ pub(crate) fn run_studio(
 
 fn configure_studio_environment(command: &mut Command) {
     command.env("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--disable-gpu");
-    let mut wine_dll_overrides = env::var("WINEDLLOVERRIDES").unwrap_or_default();
+    let mut wine_dll_overrides = match env::var_os("WINEDLLOVERRIDES") {
+        Some(value) => value,
+        None => OsString::new(),
+    };
     if !wine_dll_overrides.is_empty() {
-        wine_dll_overrides.push(';');
+        wine_dll_overrides.push(";");
     }
-    wine_dll_overrides.push_str("dxdiagn,winemenubuilder.exe,mscoree,mshtml=");
+    wine_dll_overrides.push("dxdiagn,winemenubuilder.exe,mscoree,mshtml=");
     command.env("WINEDLLOVERRIDES", wine_dll_overrides);
 }
 
@@ -252,12 +258,16 @@ fn webview2_runtime_is_installed(runtime_directory: &Path) -> Result<bool, Launc
 
 fn to_windows_drive_path(wine_prefix: &Path, path: &Path) -> Result<String, LauncherError> {
     let wine_drive = wine_prefix.join("drive_c");
-    let relative_path = path.strip_prefix(&wine_drive).map_err(|_| {
-        LauncherError::StudioExecutableOutsideWineDrive {
-            path: path.to_path_buf(),
-            wine_drive: wine_drive.clone(),
+    let relative_path = match path.strip_prefix(&wine_drive) {
+        Ok(relative_path) => relative_path,
+        Err(source) => {
+            return Err(LauncherError::StudioExecutableOutsideWineDrive {
+                path: path.to_path_buf(),
+                wine_drive,
+                source,
+            });
         }
-    })?;
+    };
 
     let mut windows_path = String::from("C:");
     for component in relative_path.components() {
@@ -293,7 +303,7 @@ fn validate_cmd_value(value: &str) -> Result<(), LauncherError> {
 }
 
 fn quote_cmd_value(value: &str) -> String {
-    let mut quoted = String::with_capacity(value.len() + 2);
+    let mut quoted = String::with_capacity(value.len() + QUOTED_VALUE_DELIMITER_COUNT);
     quoted.push('"');
     quoted.push_str(value);
     quoted.push('"');

@@ -1,5 +1,5 @@
 use std::io;
-use std::path::PathBuf;
+use std::path::{PathBuf, StripPrefixError};
 use thiserror::Error;
 use url::Url;
 
@@ -34,8 +34,13 @@ pub enum LauncherError {
         #[source]
         source: io::Error,
     },
-    #[error("Studio executable {path} is outside Wine drive C: {wine_drive}")]
-    StudioExecutableOutsideWineDrive { path: PathBuf, wine_drive: PathBuf },
+    #[error("Studio executable {path} is outside Wine drive C: {wine_drive}: {source}")]
+    StudioExecutableOutsideWineDrive {
+        path: PathBuf,
+        wine_drive: PathBuf,
+        #[source]
+        source: StripPrefixError,
+    },
     #[error("Studio launch path {path} is not a valid UTF-8 path")]
     InvalidStudioLaunchPath { path: PathBuf },
     #[error("Studio launch value contains unsupported cmd.exe characters: {value:?}")]
