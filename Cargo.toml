@@ -5,5 +5,16 @@ edition = "2021"
 description = "An unofficial Linux launcher for the Windows build of Roblox Studio through Wine."
 readme = "README.md"
 
+[dependencies]
+md5 = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+ureq = "2.12"
+url = "2"
+zip = { version = "6", default-features = false, features = ["deflate-flate2"] }
+
 [profile.release]
 strip = true

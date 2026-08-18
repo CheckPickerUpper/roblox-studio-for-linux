@@ -8,9 +8,12 @@ Roblox officially supports Studio on Windows and macOS. This project does not pr
 
 - Stores a per-user Wine prefix and launcher configuration.
 - Checks whether Wine is available.
-- Runs the official Windows Studio installer inside that prefix.
-- Finds the newest installed `RobloxStudioBeta.exe` when possible.
-- Launches Studio through Wine.
+- Installs the current official Windows Studio deployment directly into that prefix.
+- Keeps the official bootstrapper available as an explicit `--installer` fallback.
+- Finds the newest installed `RobloxStudioBeta.exe` on every launch.
+- Configures the Wine prefix for Studio and installs its WebView2 runtime when needed.
+- Registers the `roblox-studio-auth:` browser callback with the Linux desktop.
+- Launches Studio through Wine and forwards Studio command-line arguments.
 - Includes a desktop-entry template for a clickable launcher.
 
 ## Dependencies
@@ -20,9 +23,9 @@ Required system software:
 - Linux
 - Rust stable and Cargo
 - Wine, installed through your Linux distribution
-- The official Windows Roblox Studio installer
+- Winetricks with the `corefonts` and `vcrun2019` verbs available
 
-The launcher uses Rust's standard library and has no third-party Rust crate dependencies.
+The launcher downloads and verifies the current Studio packages from Roblox's official deployment endpoints. It does not require a manually downloaded installer for the normal path.
 
 ## Install from a checkout
 
@@ -41,26 +44,59 @@ cargo run -- doctor
 
 ## First run
 
-1. Download the official Windows Studio installer from Roblox.
-2. Run the installer through the launcher:
+1. Install the Windows compatibility components into the launcher's prefix:
 
    ```bash
-   roblox-studio-linux-launcher install --installer ~/Downloads/RobloxStudio.exe
+   WINEPREFIX="$HOME/.local/share/roblox-studio-linux-launcher/wine" \
+     winetricks --unattended corefonts vcrun2019
    ```
 
-3. Check what was installed:
+2. Install the current Studio deployment directly:
+
+   ```bash
+   roblox-studio-linux-launcher install
+   ```
+3. Register the browser callback (the install command also does this):
+
+   ```bash
+   roblox-studio-linux-launcher register
+   ```
+
+4. Check what was installed:
 
    ```bash
    roblox-studio-linux-launcher doctor
    ```
 
-4. Try launching Studio:
+5. Try launching Studio:
 
    ```bash
    roblox-studio-linux-launcher launch
    ```
 
-Rerunning `install` with a newer official installer is the update path. The default data directory is `~/.local/share/roblox-studio-linux-launcher`. Use `--config` to keep the configuration somewhere else.
+Rerun `install` to check for and install a newer Studio deployment. Normal launches discover the newest installed Studio executable instead of pinning launches to an older version directory. The default data directory is `~/.local/share/roblox-studio-linux-launcher`. Use `--config` to keep the configuration somewhere else.
+
+If Roblox changes the direct deployment service, a manually downloaded bootstrapper can still be run explicitly:
+
+```bash
+roblox-studio-linux-launcher install --installer ~/Downloads/RobloxStudioLauncherBeta.exe
+```
+
+If Studio is installed outside the launcher's Wine prefix, configure it as a fallback:
+
+```bash
+roblox-studio-linux-launcher configure --studio-executable /path/to/RobloxStudioBeta.exe
+```
+
+Additional arguments after `launch` are passed to Studio.
+
+## Browser login
+
+Studio starts login in the external browser when Wine's embedded WebView2 renderer cannot load Roblox's login page. The browser returns through the `roblox-studio-auth:` URI, which the launcher's registered desktop entry forwards to Studio.
+
+On WSL, use a Linux browser inside WSL for this callback path. A Windows browser uses Windows' protocol registry and cannot invoke the WSL desktop entry.
+
+If the browser was already open before registration, restart it once so it reloads the desktop application database.
 
 ## Reference implementation
 
@@ -92,15 +128,13 @@ Rust:
 - [The Cargo Book](https://doc.rust-lang.org/cargo/): build, run, and package this launcher.
 
 ## Desktop launcher
-
-After installing the command with Cargo, copy the template into your user application menu:
+`install` and `launch` register the browser callback automatically. To register it without launching Studio:
 
 ```bash
-mkdir -p ~/.local/share/applications
-cp assets/roblox-studio-linux-launcher.desktop ~/.local/share/applications/
+roblox-studio-linux-launcher register
 ```
 
-The entry opens a terminal so Wine errors remain visible while this project is experimental.
+Registration writes a per-user desktop entry and refreshes the user MIME cache for `roblox-studio-auth:`. The committed file at `assets/roblox-studio-linux-launcher.desktop` is a template for desktop-menu integration; the generated entry contains the installed launcher's absolute path.
 
 ## Development checks
 
@@ -114,5 +148,7 @@ cargo run -- --help
 
 - Linux is not an officially supported Roblox platform.
 - Wine compatibility can change after any Roblox Studio update.
-- Plugins, graphics, login, and play-testing still need real Linux testing.
+- Embedded WebView2 login may fail under Wine; use the external browser callback.
+- Browser callback delivery depends on the Linux desktop handler. Windows Chrome cannot invoke a WSL `.desktop` entry.
+- Plugins, graphics, and play-testing still need real Linux testing.
 - Windows dual boot remains the reliable fallback for Studio work.

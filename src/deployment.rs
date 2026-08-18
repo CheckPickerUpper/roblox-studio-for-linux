@@ -10,12 +10,11 @@ use zip::ZipArchive;
 
 const DEPLOYMENT_ENDPOINT: &str =
     "https://clientsettingscdn.roblox.com/v2/client-version/WindowsStudio64";
-const CDN_ENDPOINT: &str = "https://setup.rbxcdn.com";
 const CDN_CHANNEL_PATH: &str = "https://setup.rbxcdn.com/channel/common";
 const MANIFEST_SUFFIX: &str = "rbxPkgManifest.txt";
 const INSTALLER_SUFFIX: &str = "RobloxStudioInstaller.exe";
 const STUDIO_EXECUTABLE: &str = "RobloxStudioBeta.exe";
-const INSTALLATION_MARKER: &str = ".roblox-studio-deployment-complete-v3";
+const INSTALLATION_MARKER: &str = ".roblox-studio-deployment-complete-v4";
 const APP_SETTINGS_FILE: &str = "AppSettings.xml";
 const APP_SETTINGS_CONTENT: &str = concat!(
     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n",
@@ -67,12 +66,14 @@ pub(crate) fn install_latest_studio(wine_prefix: &Path) -> Result<PathBuf, Launc
     }
 
     let manifest_endpoint = format!(
-        "{CDN_ENDPOINT}/{}-{MANIFEST_SUFFIX}",
+        "{CDN_CHANNEL_PATH}/{}-{MANIFEST_SUFFIX}",
         deployment.client_version_upload
     );
     let manifest_url = parse_deployment_url(&manifest_endpoint)?;
     let manifest = fetch_manifest(&manifest_url)?;
     let packages = parse_manifest(&manifest, &manifest_url)?;
+    let package_directories =
+        fetch_package_directories(&deployment.client_version_upload, &packages)?;
 
     let cache_directory = wine_prefix.join("deployment-cache");
     fs::create_dir_all(&cache_directory).map_err(|source| {
@@ -103,7 +104,7 @@ pub(crate) fn install_latest_studio(wine_prefix: &Path) -> Result<PathBuf, Launc
 
     for package in packages {
         let archive_endpoint = format!(
-            "{CDN_ENDPOINT}/{}-{}",
+            "{CDN_CHANNEL_PATH}/{}-{}",
             deployment.client_version_upload, package.archive_name
         );
         let archive_url = parse_deployment_url(&archive_endpoint)?;
@@ -134,7 +135,13 @@ pub(crate) fn install_latest_studio(wine_prefix: &Path) -> Result<PathBuf, Launc
             ),
             false => download_archive(&archive_url, &archive_path, &package)?,
         }
-        let extracted_size = extract_archive(&archive_path, &staging_directory)?;
+        let destination =
+            staging_directory.join(package_directories.get(&package.archive_name).ok_or_else(
+                || LauncherError::MissingDeploymentPackageDirectory {
+                    package: package.archive_name.clone(),
+                },
+            )?);
+        let extracted_size = extract_archive(&archive_path, &destination)?;
         if extracted_size != package.uncompressed_size {
             return Err(LauncherError::DeploymentArchiveUncompressedSizeMismatch {
                 path: archive_path,
@@ -205,6 +212,99 @@ fn fetch_current_deployment() -> Result<StudioDeploymentResponse, LauncherError>
         url: endpoint,
         source,
     })
+}
+
+fn fetch_package_directories(
+    deployment_identifier: &str,
+    packages: &[DeploymentPackage],
+) -> Result<BTreeMap<String, PathBuf>, LauncherError> {
+    let installer_endpoint =
+        format!("{CDN_CHANNEL_PATH}/{deployment_identifier}-{INSTALLER_SUFFIX}");
+    let installer_url = parse_deployment_url(&installer_endpoint)?;
+    let response = ureq::get(installer_url.as_str()).call().map_err(|source| {
+        LauncherError::FetchDeploymentDirectories {
+            url: installer_url.clone(),
+            source: Box::new(source),
+        }
+    })?;
+    let mut installer = Vec::new();
+    response
+        .into_reader()
+        .read_to_end(&mut installer)
+        .map_err(|source| LauncherError::ReadDeploymentDirectories {
+            url: installer_url.clone(),
+            source,
+        })?;
+
+    let raw_directories = scan_package_directories(&installer).ok_or_else(|| {
+        LauncherError::ParseDeploymentDirectories {
+            url: installer_url.clone(),
+            message: "the official installer did not contain a package directory map".to_owned(),
+        }
+    })?;
+    let mut directories = BTreeMap::new();
+    for (package, directory) in raw_directories {
+        let normalized_directory = normalize_deployment_directory(&directory).ok_or_else(|| {
+            LauncherError::InvalidDeploymentPackageDirectory {
+                package: package.clone(),
+                directory,
+            }
+        })?;
+        directories.insert(package, normalized_directory);
+    }
+
+    for package in packages {
+        if !directories.contains_key(&package.archive_name) {
+            return Err(LauncherError::MissingDeploymentPackageDirectory {
+                package: package.archive_name.clone(),
+            });
+        }
+    }
+    Ok(directories)
+}
+
+fn scan_package_directories(installer: &[u8]) -> Option<BTreeMap<String, String>> {
+    let mut candidate_start = None;
+    for index in 0..installer.len() {
+        let starts_json = index + 1 < installer.len()
+            && installer[index] == b"{"[0]
+            && installer[index + 1] == b"\""[0]
+            && (index == 0 || installer[index - 1] == b"\0"[0]);
+        if starts_json {
+            candidate_start = Some(index);
+        }
+
+        let ends_json = index >= 2
+            && installer[index] == b"\0"[0]
+            && installer[index - 1] == b"}"[0]
+            && installer[index - 2] == b"\""[0];
+        if ends_json {
+            if let Some(start) = candidate_start.take() {
+                if let Ok(directories) = serde_json::from_slice(&installer[start..index]) {
+                    return Some(directories);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn normalize_deployment_directory(directory: &str) -> Option<PathBuf> {
+    let normalized_name = directory.replace(char::from(92), "/");
+    let relative_name = normalized_name.trim_end_matches(char::from(47));
+    if relative_name.is_empty() {
+        return Some(PathBuf::new());
+    }
+
+    let mut relative_path = PathBuf::new();
+    for component in Path::new(relative_name).components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(segment) => relative_path.push(segment),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(relative_path)
 }
 
 fn parse_deployment_url(endpoint: &str) -> Result<Url, LauncherError> {

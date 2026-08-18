@@ -1,8 +1,19 @@
 use crate::config::{default_config_path, load_config, save_config, LauncherConfig};
+use crate::deployment::install_latest_studio;
+use crate::desktop;
 use crate::error::LauncherError;
-use crate::runtime::{discover_studio_executable, resolve_wine_binary, run_wine};
+use crate::runtime::{
+    configure_webview2_runtime, configure_wine_prefix, discover_studio_executable,
+    ensure_webview2_runtime, resolve_wine_binary, run_studio, run_studio_auth, run_wine,
+};
 use std::env;
 use std::path::PathBuf;
+
+const SUCCESS_EXIT_CODE: i32 = 0;
+const CHECK_FAILED_EXIT_CODE: i32 = 1;
+const INVALID_ARGUMENT_EXIT_CODE: i32 = 2;
+const FIRST_ARGUMENT_INDEX: usize = 0;
+const INDEX_STEP: usize = 1;
 
 const USAGE: &str = r#"Roblox Studio Linux Launcher
 
@@ -12,20 +23,25 @@ Usage:
 Commands:
   doctor       Check Wine, the prefix, and the Studio installation.
   configure    Save Wine and Studio paths.
-  install      Run the official Windows Studio installer through Wine.
-  launch       Launch the installed Studio executable.
+  install      Install the current Studio deployment directly from Roblox.
+  launch       Launch the newest installed Studio executable.
+  register     Register the browser login callback with the desktop.
 
 Configure options:
   --wine-binary PATH          Wine command or executable path.
   --wine-prefix PATH          Wine prefix directory.
-  --studio-executable PATH    Path to RobloxStudioBeta.exe.
+  --studio-executable PATH    Fallback path to RobloxStudioBeta.exe.
 
 Install options:
-  --installer PATH             Path to the downloaded Studio installer.
+  --installer PATH             Run a locally downloaded bootstrapper through Wine.
+
+Launch arguments:
+  Arguments after launch are passed to RobloxStudioBeta.exe.
 "#;
 
 enum Command {
     Help,
+    Register,
     Doctor,
     Configure {
         wine_binary: Option<String>,
@@ -33,9 +49,11 @@ enum Command {
         studio_executable: Option<PathBuf>,
     },
     Install {
-        installer: PathBuf,
+        installer: Option<PathBuf>,
     },
-    Launch,
+    Launch {
+        studio_arguments: Vec<String>,
+    },
 }
 
 struct Arguments {
@@ -43,101 +61,153 @@ struct Arguments {
     command: Command,
 }
 
-pub fn run() -> Result<i32, LauncherError> {
-    let arguments = parse(env::args().skip(1))?;
-    if matches!(&arguments.command, Command::Help) {
-        print!("{USAGE}");
-        return Ok(0);
-    }
+/// Runs the requested launcher command and returns its process exit code.
+pub fn run_launcher() -> Result<i32, LauncherError> {
+    let Arguments {
+        config_path,
+        command,
+    } = parse_launcher_arguments(env::args().skip(1))?;
 
-    let config = load_config(&arguments.config_path)?;
-    match arguments.command {
-        Command::Help => Ok(0),
-        Command::Doctor => doctor(&config),
+    match command {
+        Command::Help => {
+            tracing::info!("{USAGE}");
+            Ok(SUCCESS_EXIT_CODE)
+        }
+        Command::Register => {
+            desktop::register_auth_handler()?;
+            Ok(SUCCESS_EXIT_CODE)
+        }
+        Command::Doctor => {
+            let launcher_config = load_config(&config_path)?;
+            report_launcher_doctor(&launcher_config)
+        }
         Command::Configure {
             wine_binary,
             wine_prefix,
             studio_executable,
-        } => configure(&config, wine_binary, wine_prefix, studio_executable),
-        Command::Install { installer } => install(&config, installer),
-        Command::Launch => launch(&config),
+        } => {
+            let launcher_config = load_config(&config_path)?;
+            configure_launcher(
+                &launcher_config,
+                wine_binary,
+                wine_prefix,
+                studio_executable,
+            )
+        }
+        Command::Install { installer } => {
+            let launcher_config = load_config(&config_path)?;
+            install_studio(&launcher_config, installer)
+        }
+        Command::Launch { studio_arguments } => {
+            let launcher_config = load_config(&config_path)?;
+            launch_latest_studio(&launcher_config, &studio_arguments)
+        }
     }
 }
 
-fn parse<I>(raw_arguments: I) -> Result<Arguments, LauncherError>
+fn parse_launcher_arguments<I>(raw_arguments: I) -> Result<Arguments, LauncherError>
 where
     I: IntoIterator<Item = String>,
 {
     let mut tokens = raw_arguments.into_iter().collect::<Vec<_>>();
-    if tokens.is_empty()
-        || tokens
-            .iter()
-            .any(|token| token == "--help" || token == "-h")
-    {
+    if tokens.is_empty() {
         return Ok(Arguments {
             config_path: default_config_path(),
             command: Command::Help,
         });
     }
 
-    let config_path = if tokens.first().map(String::as_str) == Some("--config") {
-        tokens.remove(0);
-        PathBuf::from(required_value(&mut tokens, "--config")?)
-    } else {
-        default_config_path()
+    let config_path = match tokens.first().map(String::as_str) {
+        Some("--config") => {
+            tokens.remove(FIRST_ARGUMENT_INDEX);
+            expand_user_path(PathBuf::from(take_required_value(&mut tokens, "--config")?))
+        }
+        Some(_) | None => default_config_path(),
     };
-    let command_name = tokens.remove(0);
+
+    let command_name = match tokens.first().cloned() {
+        Some(command_name) => {
+            tokens.remove(FIRST_ARGUMENT_INDEX);
+            command_name
+        }
+        None => {
+            return Err(invalid_arguments(
+                "a command is required".to_owned(),
+                &tokens,
+            ));
+        }
+    };
+
     let command = match command_name.as_str() {
-        "doctor" if tokens.is_empty() => Command::Doctor,
-        "configure" => parse_configure(&tokens)?,
-        "install" => parse_install(&tokens)?,
-        "launch" if tokens.is_empty() => Command::Launch,
-        "doctor" | "launch" => {
-            return Err(LauncherError::InvalidArguments {
-                message: format!("unexpected arguments for {command_name}"),
-            });
-        }
+        "--help" | "-h" => Command::Help,
+        "register" => match tokens.split_first() {
+            None => Command::Register,
+            Some(_) => {
+                return Err(invalid_arguments(
+                    "register does not accept arguments".to_owned(),
+                    &tokens,
+                ));
+            }
+        },
+        "doctor" => match tokens.split_first() {
+            None => Command::Doctor,
+            Some(_) => {
+                return Err(invalid_arguments(
+                    "doctor does not accept arguments".to_owned(),
+                    &tokens,
+                ));
+            }
+        },
+        "configure" => parse_configure_arguments(&tokens)?,
+        "install" => parse_install_arguments(&tokens)?,
+        "launch" => Command::Launch {
+            studio_arguments: tokens,
+        },
         _ => {
-            return Err(LauncherError::InvalidArguments {
-                message: format!("unknown command: {command_name}\n\n{USAGE}"),
-            });
+            return Err(invalid_arguments(
+                format!("unknown command: {command_name}\n\n{USAGE}"),
+                &tokens,
+            ));
         }
     };
+
     Ok(Arguments {
         config_path,
         command,
     })
 }
 
-fn parse_configure(tokens: &[String]) -> Result<Command, LauncherError> {
+fn parse_configure_arguments(tokens: &[String]) -> Result<Command, LauncherError> {
     let mut wine_binary = None;
     let mut wine_prefix = None;
     let mut studio_executable = None;
     let mut index = 0;
-    while index < tokens.len() {
-        let option = &tokens[index];
-        index += 1;
+
+    while let Some(option) = tokens.get(index) {
+        index += INDEX_STEP;
         match option.as_str() {
             "--wine-binary" => {
-                wine_binary = Some(required_indexed_value(tokens, &mut index, option)?)
+                wine_binary = Some(take_indexed_value(tokens, &mut index, option)?);
             }
             "--wine-prefix" => {
-                wine_prefix = Some(PathBuf::from(required_indexed_value(
+                wine_prefix = Some(expand_user_path(PathBuf::from(take_indexed_value(
                     tokens, &mut index, option,
-                )?));
+                )?)));
             }
             "--studio-executable" => {
-                studio_executable = Some(PathBuf::from(required_indexed_value(
+                studio_executable = Some(expand_user_path(PathBuf::from(take_indexed_value(
                     tokens, &mut index, option,
-                )?));
+                )?)));
             }
             _ => {
-                return Err(LauncherError::InvalidArguments {
-                    message: format!("unknown configure option: {option}"),
-                });
+                return Err(invalid_arguments(
+                    format!("unknown configure option: {option}"),
+                    tokens,
+                ));
             }
         }
     }
+
     Ok(Command::Configure {
         wine_binary,
         wine_prefix,
@@ -145,148 +215,402 @@ fn parse_configure(tokens: &[String]) -> Result<Command, LauncherError> {
     })
 }
 
-fn parse_install(tokens: &[String]) -> Result<Command, LauncherError> {
-    if tokens.len() != 2 || tokens[0] != "--installer" {
-        return Err(LauncherError::InvalidArguments {
-            message: "install requires exactly --installer PATH".to_owned(),
-        });
+fn parse_install_arguments(tokens: &[String]) -> Result<Command, LauncherError> {
+    match tokens {
+        [] => Ok(Command::Install { installer: None }),
+        [option, installer] => match option.as_str() {
+            "--installer" => Ok(Command::Install {
+                installer: Some(expand_user_path(PathBuf::from(installer))),
+            }),
+            _ => Err(invalid_arguments(
+                "install accepts no arguments or exactly --installer PATH".to_owned(),
+                tokens,
+            )),
+        },
+        _ => Err(invalid_arguments(
+            "install accepts no arguments or exactly --installer PATH".to_owned(),
+            tokens,
+        )),
     }
-    Ok(Command::Install {
-        installer: PathBuf::from(&tokens[1]),
-    })
 }
 
-fn required_value(tokens: &mut Vec<String>, option: &str) -> Result<String, LauncherError> {
-    if tokens.is_empty() {
-        return Err(LauncherError::InvalidArguments {
-            message: format!("{option} requires a value"),
-        });
+fn take_required_value(tokens: &mut Vec<String>, option: &str) -> Result<String, LauncherError> {
+    match tokens.first().cloned() {
+        Some(value) => {
+            tokens.remove(FIRST_ARGUMENT_INDEX);
+            Ok(value)
+        }
+        None => Err(invalid_arguments(
+            format!("{option} requires a value"),
+            tokens,
+        )),
     }
-    Ok(tokens.remove(0))
 }
 
-fn required_indexed_value(
+fn take_indexed_value(
     tokens: &[String],
     index: &mut usize,
     option: &str,
 ) -> Result<String, LauncherError> {
-    let Some(value) = tokens.get(*index) else {
-        return Err(LauncherError::InvalidArguments {
-            message: format!("{option} requires a value"),
-        });
+    match tokens.get(*index).cloned() {
+        Some(value) => {
+            *index += INDEX_STEP;
+            Ok(value)
+        }
+        None => Err(invalid_arguments(
+            format!("{option} requires a value"),
+            tokens,
+        )),
+    }
+}
+
+fn invalid_arguments(message: String, provided_arguments: &[String]) -> LauncherError {
+    LauncherError::InvalidArguments {
+        message,
+        provided_arguments: provided_arguments.to_vec(),
+    }
+}
+
+fn expand_user_path(path: PathBuf) -> PathBuf {
+    let Some(home) = env::var_os("HOME").map(PathBuf::from) else {
+        return path;
     };
-    *index += 1;
-    Ok(value.clone())
+    let Some(path_string) = path.to_str() else {
+        return path;
+    };
+
+    match path_string {
+        "~" => home,
+        _ => match path_string.strip_prefix("~/") {
+            Some(relative) => home.join(relative),
+            None => path,
+        },
+    }
 }
 
-fn doctor(config: &LauncherConfig) -> Result<i32, LauncherError> {
+fn report_launcher_doctor(launcher_config: &LauncherConfig) -> Result<i32, LauncherError> {
     let mut issues = Vec::new();
-    let wine_path = resolve_wine_binary(&config.wine_binary);
-    println!("Config: {}", config.config_path.display());
-    match &wine_path {
-        Some(path) => println!("Wine: {}", path.display()),
+    tracing::info!(
+        path = %launcher_config.config_path.display(),
+        "Launcher configuration"
+    );
+
+    match resolve_wine_binary(&launcher_config.wine_binary) {
+        Some(path) => tracing::info!(path = %path.display(), "Wine executable"),
         None => {
-            println!("Wine: missing ({})", config.wine_binary);
-            issues.push("Wine is not available on PATH.");
+            tracing::warn!(
+                binary = %launcher_config.wine_binary,
+                "Wine executable is unavailable"
+            );
+            issues.push("Wine is not available on PATH.".to_owned());
         }
     }
 
-    println!("Wine prefix: {}", config.wine_prefix.display());
-    if !config.wine_prefix.exists() {
-        println!("Wine prefix: not created yet");
+    tracing::info!(
+        path = %launcher_config.wine_prefix.display(),
+        "Wine prefix"
+    );
+    match launcher_config.wine_prefix.exists() {
+        true => {}
+        false => tracing::info!("Wine prefix has not been created yet"),
     }
-    if let Some(path) = &config.studio_executable {
-        println!("Configured Studio: {}", path.display());
-        if !path.is_file() {
-            issues.push("The configured Studio executable does not exist.");
+
+    if let Some(path) = &launcher_config.studio_executable {
+        tracing::info!(
+            path = %path.display(),
+            "Configured Studio fallback"
+        );
+        match path.is_file() {
+            true => {}
+            false => tracing::warn!("Configured Studio fallback is missing"),
         }
     }
 
-    let discovered = discover_studio_executable(&config.wine_prefix)?;
-    match discovered {
-        Some(path) => println!("Discovered Studio: {}", path.display()),
+    let discovered = discover_studio_executable(&launcher_config.wine_prefix)?;
+    let selected = match discovered {
+        Some(path) => Some(path),
+        None => match &launcher_config.studio_executable {
+            Some(path) => match path.is_file() {
+                true => Some(path.clone()),
+                false => None,
+            },
+            None => None,
+        },
+    };
+
+    match selected {
+        Some(path) => tracing::info!(
+            path = %path.display(),
+            "Selected Studio executable"
+        ),
         None => {
-            println!("Discovered Studio: not found");
-            issues.push("RobloxStudioBeta.exe was not found in the Wine prefix.");
+            tracing::warn!("Studio executable is unavailable");
+            issues.push(
+                "RobloxStudioBeta.exe was not found in the Wine prefix or configured path."
+                    .to_owned(),
+            );
         }
     }
 
-    if issues.is_empty() {
-        println!("Launcher environment looks ready.");
-        return Ok(0);
+    match issues.is_empty() {
+        true => {
+            tracing::info!("Launcher environment looks ready");
+            Ok(SUCCESS_EXIT_CODE)
+        }
+        false => {
+            for issue in issues {
+                tracing::error!(issue = %issue, "Launcher issue");
+            }
+            Ok(CHECK_FAILED_EXIT_CODE)
+        }
     }
-    for issue in issues {
-        eprintln!("Issue: {issue}");
-    }
-    Ok(1)
 }
 
-fn configure(
-    config: &LauncherConfig,
+fn configure_launcher(
+    launcher_config: &LauncherConfig,
     wine_binary: Option<String>,
     wine_prefix: Option<PathBuf>,
     studio_executable: Option<PathBuf>,
 ) -> Result<i32, LauncherError> {
-    let updated = LauncherConfig {
-        config_path: config.config_path.clone(),
-        wine_binary: wine_binary.unwrap_or_else(|| config.wine_binary.clone()),
-        wine_prefix: wine_prefix.unwrap_or_else(|| config.wine_prefix.clone()),
-        studio_executable: studio_executable.or_else(|| config.studio_executable.clone()),
+    let selected_wine_binary = match wine_binary {
+        Some(value) => value,
+        None => launcher_config.wine_binary.clone(),
     };
-    save_config(&updated)?;
-    println!("Saved configuration to {}", updated.config_path.display());
-    Ok(0)
+    let selected_wine_prefix = match wine_prefix {
+        Some(path) => path,
+        None => launcher_config.wine_prefix.clone(),
+    };
+    let selected_studio_executable = match studio_executable {
+        Some(path) => Some(path),
+        None => launcher_config.studio_executable.clone(),
+    };
+    let updated_config = LauncherConfig {
+        config_path: launcher_config.config_path.clone(),
+        wine_binary: selected_wine_binary,
+        wine_prefix: selected_wine_prefix,
+        studio_executable: selected_studio_executable,
+    };
+
+    save_config(&updated_config)?;
+    tracing::info!(
+        path = %updated_config.config_path.display(),
+        "Saved launcher configuration"
+    );
+    Ok(SUCCESS_EXIT_CODE)
 }
 
-fn install(config: &LauncherConfig, installer: PathBuf) -> Result<i32, LauncherError> {
-    if !installer.is_file() {
-        eprintln!("Installer file was not found: {}", installer.display());
-        return Ok(2);
-    }
-    let Some(wine_path) = resolve_wine_binary(&config.wine_binary) else {
-        eprintln!("Wine command was not found: {}", config.wine_binary);
-        return Ok(2);
+fn install_studio(
+    launcher_config: &LauncherConfig,
+    installer: Option<PathBuf>,
+) -> Result<i32, LauncherError> {
+    let exit_code = match installer {
+        Some(path) => install_studio_with_bootstrapper(launcher_config, path)?,
+        None => install_latest_studio_deployment(launcher_config)?,
     };
+    if exit_code == SUCCESS_EXIT_CODE {
+        register_auth_handler_best_effort();
+    }
+    Ok(exit_code)
+}
 
-    println!("Running installer with Wine: {}", installer.display());
-    let arguments = vec![installer.display().to_string()];
-    let exit_code = run_wine(&wine_path, &config.wine_prefix, &arguments)?;
-    if exit_code != 0 {
-        eprintln!("Installer exited with status {exit_code}.");
+fn install_latest_studio_deployment(
+    launcher_config: &LauncherConfig,
+) -> Result<i32, LauncherError> {
+    let wine_path = match resolve_wine_binary(&launcher_config.wine_binary) {
+        Some(path) => path,
+        None => {
+            tracing::error!(
+                binary = %launcher_config.wine_binary,
+                "Wine command is unavailable"
+            );
+            return Ok(INVALID_ARGUMENT_EXIT_CODE);
+        }
+    };
+    tracing::debug!(path = %wine_path.display(), "Wine executable is available");
+
+    let exit_code = configure_wine_prefix(&wine_path, &launcher_config.wine_prefix)?;
+    if exit_code != SUCCESS_EXIT_CODE {
+        tracing::error!(exit_code, "Wine prefix Windows version setup failed");
         return Ok(exit_code);
     }
-    let discovered = discover_studio_executable(&config.wine_prefix)?;
-    match discovered {
-        Some(path) => {
-            let updated = LauncherConfig {
-                studio_executable: Some(path.clone()),
-                ..config.clone()
-            };
-            save_config(&updated)?;
-            println!("Saved Studio executable: {}", path.display());
-        }
-        None => println!("Installer finished, but Studio was not found automatically."),
+
+    let studio_executable = install_latest_studio(&launcher_config.wine_prefix)?;
+    tracing::info!(
+        path = %studio_executable.display(),
+        "Installed current Studio deployment"
+    );
+
+    let exit_code =
+        ensure_webview2_runtime(&wine_path, &launcher_config.wine_prefix, &studio_executable)?;
+    if exit_code != SUCCESS_EXIT_CODE {
+        return Ok(exit_code);
     }
-    Ok(0)
+
+    configure_webview2_override(&wine_path, &launcher_config.wine_prefix)
 }
 
-fn launch(config: &LauncherConfig) -> Result<i32, LauncherError> {
-    let Some(wine_path) = resolve_wine_binary(&config.wine_binary) else {
-        eprintln!("Wine command was not found: {}", config.wine_binary);
-        return Ok(2);
+fn install_studio_with_bootstrapper(
+    launcher_config: &LauncherConfig,
+    installer: PathBuf,
+) -> Result<i32, LauncherError> {
+    match installer.is_file() {
+        true => {}
+        false => {
+            tracing::error!(
+                path = %installer.display(),
+                "Studio installer is unavailable"
+            );
+            return Ok(INVALID_ARGUMENT_EXIT_CODE);
+        }
+    }
+
+    let wine_path = match resolve_wine_binary(&launcher_config.wine_binary) {
+        Some(path) => path,
+        None => {
+            tracing::error!(
+                binary = %launcher_config.wine_binary,
+                "Wine command is unavailable"
+            );
+            return Ok(INVALID_ARGUMENT_EXIT_CODE);
+        }
     };
-    let studio_executable = match &config.studio_executable {
-        Some(path) if path.is_file() => path.clone(),
-        _ => match discover_studio_executable(&config.wine_prefix)? {
-            Some(path) => path,
+
+    let exit_code = configure_wine_prefix(&wine_path, &launcher_config.wine_prefix)?;
+    if exit_code != SUCCESS_EXIT_CODE {
+        tracing::error!(exit_code, "Wine prefix Windows version setup failed");
+        return Ok(exit_code);
+    }
+
+    tracing::info!(
+        path = %installer.display(),
+        "Running Studio installer through Wine"
+    );
+    let installer_arguments = vec![installer.display().to_string()];
+    let exit_code = run_wine(
+        &wine_path,
+        &launcher_config.wine_prefix,
+        &installer_arguments,
+    )?;
+    if exit_code != SUCCESS_EXIT_CODE {
+        tracing::error!(exit_code, "Studio installer exited unsuccessfully");
+        return Ok(exit_code);
+    }
+
+    match discover_studio_executable(&launcher_config.wine_prefix)? {
+        Some(path) => {
+            tracing::info!(
+                path = %path.display(),
+                "Latest installed Studio"
+            );
+            let exit_code =
+                ensure_webview2_runtime(&wine_path, &launcher_config.wine_prefix, &path)?;
+            if exit_code != SUCCESS_EXIT_CODE {
+                return Ok(exit_code);
+            }
+            configure_webview2_override(&wine_path, &launcher_config.wine_prefix)
+        }
+        None => {
+            tracing::warn!("Installer finished without a discovered Studio executable");
+            Ok(SUCCESS_EXIT_CODE)
+        }
+    }
+}
+
+fn launch_latest_studio(
+    launcher_config: &LauncherConfig,
+    studio_arguments: &[String],
+) -> Result<i32, LauncherError> {
+    let wine_path = match resolve_wine_binary(&launcher_config.wine_binary) {
+        Some(path) => path,
+        None => {
+            tracing::error!(
+                binary = %launcher_config.wine_binary,
+                "Wine command is unavailable"
+            );
+            return Ok(INVALID_ARGUMENT_EXIT_CODE);
+        }
+    };
+
+    let studio_executable = match discover_studio_executable(&launcher_config.wine_prefix)? {
+        Some(path) => path,
+        None => match &launcher_config.studio_executable {
+            Some(path) => match path.is_file() {
+                true => path.clone(),
+                false => {
+                    tracing::error!(
+                        path = %path.display(),
+                        "Configured Studio fallback is missing"
+                    );
+                    return Ok(INVALID_ARGUMENT_EXIT_CODE);
+                }
+            },
             None => {
-                eprintln!("RobloxStudioBeta.exe was not found. Run install first.");
-                return Ok(2);
+                tracing::error!("RobloxStudioBeta.exe was not found; run install first");
+                return Ok(INVALID_ARGUMENT_EXIT_CODE);
             }
         },
     };
 
-    println!("Launching Studio: {}", studio_executable.display());
-    let arguments = vec![studio_executable.display().to_string()];
-    run_wine(&wine_path, &config.wine_prefix, &arguments)
+    let exit_code = configure_wine_prefix(&wine_path, &launcher_config.wine_prefix)?;
+    if exit_code != SUCCESS_EXIT_CODE {
+        tracing::error!(exit_code, "Wine prefix Windows version setup failed");
+        return Ok(exit_code);
+    }
+
+    let exit_code =
+        ensure_webview2_runtime(&wine_path, &launcher_config.wine_prefix, &studio_executable)?;
+    if exit_code != SUCCESS_EXIT_CODE {
+        return Ok(exit_code);
+    }
+
+    let exit_code = configure_webview2_override(&wine_path, &launcher_config.wine_prefix)?;
+    if exit_code != SUCCESS_EXIT_CODE {
+        return Ok(exit_code);
+    }
+
+    register_auth_handler_best_effort();
+
+    tracing::info!(
+        path = %studio_executable.display(),
+        "Launching latest Studio"
+    );
+    if studio_arguments
+        .first()
+        .is_some_and(|argument| argument.starts_with("roblox-studio-auth:"))
+    {
+        tracing::info!("Launching Studio authentication callback");
+        return run_studio_auth(
+            &wine_path,
+            &launcher_config.wine_prefix,
+            &studio_executable,
+            studio_arguments,
+        );
+    }
+
+    run_studio(
+        &wine_path,
+        &launcher_config.wine_prefix,
+        &studio_executable,
+        studio_arguments,
+    )
+}
+
+fn configure_webview2_override(
+    wine_path: &std::path::Path,
+    wine_prefix: &std::path::Path,
+) -> Result<i32, LauncherError> {
+    let exit_code = configure_webview2_runtime(wine_path, wine_prefix)?;
+    if exit_code != SUCCESS_EXIT_CODE {
+        tracing::error!(exit_code, "WebView2 Wine override setup failed");
+    }
+    Ok(exit_code)
+}
+
+fn register_auth_handler_best_effort() {
+    if let Err(error) = desktop::register_auth_handler() {
+        tracing::warn!(
+            error = %error,
+            "Could not register the browser login handler"
+        );
+    }
 }
