@@ -6,6 +6,8 @@ description = "An unofficial Linux launcher for the Windows build of Roblox Stud
 readme = "README.md"
 
 [dependencies]
+gtk4 = "0.11.4"
+libadwaita = "0.9.2"
 md5 = "0.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

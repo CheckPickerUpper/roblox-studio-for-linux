@@ -1,0 +1,4 @@
+[install]
+sets = ["rust", "audit"]
+extra = []
+omit = []
