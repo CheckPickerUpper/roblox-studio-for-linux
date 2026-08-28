@@ -1,5 +1,6 @@
+use crate::durable_file::replace_file;
 use crate::error::LauncherError;
-use std::env;
+use crate::platform::xdg_data_home;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -146,9 +147,11 @@ pub fn save_config(config: &LauncherConfig) -> Result<(), LauncherError> {
         executable,
         config.login_mode.config_value(),
     );
-    fs::write(&config.config_path, contents).map_err(|source| LauncherError::WriteConfig {
-        path: config.config_path.clone(),
-        source,
+    replace_file(&config.config_path, contents.as_bytes()).map_err(|source| {
+        LauncherError::WriteConfig {
+            path: config.config_path.clone(),
+            source,
+        }
     })
 }
 
@@ -202,11 +205,7 @@ fn record_login_mode(
 }
 
 fn data_directory() -> PathBuf {
-    let base_directory = env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
-        .unwrap_or_else(|| PathBuf::from("."));
-    base_directory.join(APP_DIRECTORY_NAME)
+    xdg_data_home().join(APP_DIRECTORY_NAME)
 }
 
 #[cfg(test)]

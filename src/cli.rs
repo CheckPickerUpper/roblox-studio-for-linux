@@ -5,9 +5,10 @@ use crate::deployment::install_latest_studio;
 use crate::desktop;
 use crate::error::LauncherError;
 use crate::mcp::{
-    doctor_mcp, generate_client_configuration, route_auth_callback_if_needed, serve_mcp,
-    setup_client_configuration,
+    doctor_mcp, generate_client_configuration, serve_mcp, setup_client_configuration,
+    McpDoctorOutput,
 };
+use crate::platform::ActiveStudioInvocation;
 use crate::runtime::{
     chromium_timestamp_now, configure_wine_prefix, latest_studio_auth_visit_time,
     prepare_studio_runtime, resolve_wine_binary, run_studio, run_studio_auth, run_wine,
@@ -35,7 +36,7 @@ Commands:
   install      Install the current Studio deployment directly from Roblox.
   launch       Launch the newest installed Studio executable.
   register     Register the browser login callback with the desktop.
-  mcp          Connect an AI client to the matching Studio MCP process.
+  mcp          Set up and check AI access to the open Studio place.
 
 Configure options:
   --wine-binary PATH          Wine command or executable path.
@@ -53,7 +54,7 @@ Launch arguments:
 
 MCP commands:
   mcp serve                         Serve StudioMCP.exe over inherited stdio.
-  mcp doctor                        Verify StudioMCP and a live Studio session.
+  mcp doctor [--json]               Verify StudioMCP and a live Studio session.
   mcp setup --client-config PATH    Safely merge Roblox_Studio into client JSON.
   mcp setup --print                 Print a ready-to-copy client JSON configuration.
 "#;
@@ -86,7 +87,9 @@ enum Command {
 
 enum McpAction {
     Serve,
-    Doctor,
+    Doctor {
+        output: McpDoctorOutput,
+    },
     Setup {
         client_config: Option<PathBuf>,
         print_only: bool,
@@ -268,12 +271,19 @@ fn parse_mcp_arguments(tokens: &[String]) -> Result<Command, LauncherError> {
                 tokens,
             )),
         },
-        "doctor" => match tokens.len() {
-            1 => Ok(Command::Mcp {
-                action: McpAction::Doctor,
+        "doctor" => match tokens.get(1).map(String::as_str) {
+            None => Ok(Command::Mcp {
+                action: McpAction::Doctor {
+                    output: McpDoctorOutput::HumanReadable,
+                },
             }),
-            _ => Err(invalid_arguments(
-                "mcp doctor does not accept arguments".to_owned(),
+            Some("--json") if tokens.len() == 2 => Ok(Command::Mcp {
+                action: McpAction::Doctor {
+                    output: McpDoctorOutput::Json,
+                },
+            }),
+            Some(_) => Err(invalid_arguments(
+                "mcp doctor accepts only --json".to_owned(),
                 tokens,
             )),
         },
@@ -539,7 +549,7 @@ fn run_mcp_action(
 ) -> Result<i32, LauncherError> {
     match action {
         McpAction::Serve => serve_mcp(launcher_config),
-        McpAction::Doctor => doctor_mcp(launcher_config),
+        McpAction::Doctor { output } => doctor_mcp(launcher_config, output),
         McpAction::Setup {
             client_config,
             print_only,
@@ -762,7 +772,10 @@ fn launch_latest_studio(
         .first()
         .is_some_and(|argument| argument.starts_with("roblox-studio-auth:"));
     if is_auth_callback {
-        if let Some(exit_code) = route_auth_callback_if_needed(launcher_config, studio_arguments)? {
+        let arguments = std::iter::once(std::ffi::OsString::from("launch"))
+            .chain(studio_arguments.iter().map(std::ffi::OsString::from));
+        let invocation = ActiveStudioInvocation::process(&launcher_config.config_path, arguments);
+        if let Some(exit_code) = invocation.run_if_needed()? {
             return Ok(exit_code);
         }
     }

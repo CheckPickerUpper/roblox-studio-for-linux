@@ -1,4 +1,5 @@
 use crate::config::StudioLoginMode;
+use crate::durable_file::replace_file;
 use crate::error::LauncherError;
 use ring::digest::{Context as DigestContext, SHA256};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -509,7 +510,7 @@ fn set_studio_webview2_override(
             message: source.to_string(),
         }
     })?;
-    fs::write(&settings_path, contents).map_err(|source| {
+    replace_file(&settings_path, &contents).map_err(|source| {
         LauncherError::WriteStudioClientSettings {
             path: settings_path.clone(),
             source,

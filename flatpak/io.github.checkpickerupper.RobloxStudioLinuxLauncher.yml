@@ -19,8 +19,8 @@ finish-args:
   - --talk-name=org.freedesktop.portal.Desktop
   - --env=XDG_DESKTOP_PORTAL_BACKEND=gtk
   - --socket=pulseaudio
-  # The default Wine prefix lives below XDG_DATA_HOME. Home access also permits
-  # users to select an existing prefix or Studio installation in the GUI.
+  # Studio files live below XDG_DATA_HOME. Home access also permits launching
+  # project files selected from the user's folders.
   - --filesystem=home
 modules:
   - name: roblox-studio-linux-launcher

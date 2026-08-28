@@ -30,6 +30,11 @@ pub enum LauncherError {
         #[source]
         source: io::Error,
     },
+    #[error("could not serialize the MCP doctor result: {source}")]
+    SerializeMcpDoctorFinding {
+        #[source]
+        source: serde_json::Error,
+    },
     #[error("could not create Wine prefix {path}: {source}")]
     CreateWinePrefix {
         path: PathBuf,
@@ -380,6 +385,8 @@ pub enum LauncherError {
     MissingMcpExecutable { path: PathBuf },
     #[error("MCP runtime is unavailable: {message}")]
     McpRuntimeUnavailable { message: String },
+    #[error("Flatpak Studio instance is unavailable: {message}")]
+    FlatpakInstanceUnavailable { message: String },
     #[error("MCP protocol request {method} failed: {message}")]
     McpProtocolFailure { method: String, message: String },
     #[error("MCP protocol request {method} timed out after {timeout_seconds} seconds")]

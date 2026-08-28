@@ -1,4 +1,5 @@
 use crate::error::LauncherError;
+use crate::platform::xdg_data_home;
 use std::env;
 use std::fs;
 use std::io;
@@ -117,11 +118,7 @@ const fn xdg_mime_program(in_flatpak: bool) -> &'static str {
 }
 
 fn data_directory() -> PathBuf {
-    env::var_os("XDG_DATA_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
-        .unwrap_or_else(|| PathBuf::from("."))
+    xdg_data_home()
 }
 
 fn install_launcher_icon() -> Result<(), LauncherError> {

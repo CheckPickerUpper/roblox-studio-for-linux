@@ -1,33 +1,36 @@
+mod doctor_finding;
+
+pub(crate) use doctor_finding::McpDoctorFinding;
+
 use crate::config::LauncherConfig;
+use crate::durable_file::replace_file;
 use crate::error::LauncherError;
+use crate::platform::{
+    is_studio_process_command_line, ActiveStudioInvocation, FLATPAK_APPLICATION_ID,
+};
 use crate::runtime::{
     create_wine_command, discover_studio_installation, exec_wine_stdio, resolve_wine_binary,
     StudioInstallation,
 };
 use serde_json::{json, Map, Value};
 use std::env;
-use std::fs::{self, OpenOptions};
+use std::ffi::OsString;
+use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 const ROBLOX_MCP_SERVER_NAME: &str = "Roblox_Studio";
-const FLATPAK_APP_ID: &str = "io.github.checkpickerupper.RobloxStudioLinuxLauncher";
 const MCP_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 const MCP_TOOL_LIST_TIMEOUT: Duration = Duration::from_secs(5);
 const MCP_STUDIO_ATTACH_RETRY_COUNT: usize = 33;
 const MCP_STUDIO_ATTACH_RETRY_DELAY: Duration = Duration::from_millis(250);
 const MCP_STDIO_ARGUMENT: &str = "--stdio";
 const MCP_VERBOSE_ARGUMENT: &str = "--verbose";
-const FLATPAK_ENTERED_ENVIRONMENT: &str = "ROBLOX_LAUNCHER_FLATPAK_ENTERED";
-const FLATPAK_STATUS_PATH_ENVIRONMENT: &str = "ROBLOX_LAUNCHER_FLATPAK_STATUS_PATH";
-const FLATPAK_SPAWN_PATH: &str = "/usr/bin/flatpak-spawn";
-const FLATPAK_ENTER_RETRY_COUNT: usize = 20;
-const FLATPAK_ENTER_RETRY_DELAY: Duration = Duration::from_millis(250);
 const REQUIRED_TOOL_NAMES: [&str; 3] = [
     "list_roblox_studios",
     "get_studio_state",
@@ -36,8 +39,12 @@ const REQUIRED_TOOL_NAMES: [&str; 3] = [
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn serve_mcp(launcher_config: &LauncherConfig) -> Result<i32, LauncherError> {
-    if should_enter_running_flatpak_instance() {
-        return run_mcp_in_running_flatpak_instance(launcher_config, "serve");
+    let invocation = ActiveStudioInvocation::process(
+        &launcher_config.config_path,
+        ["mcp", "serve"].map(OsString::from),
+    );
+    if let Some(exit_code) = invocation.run_if_needed()? {
+        return Ok(exit_code);
     }
     serve_mcp_direct(launcher_config)
 }
@@ -82,229 +89,47 @@ fn serve_mcp_direct(launcher_config: &LauncherConfig) -> Result<i32, LauncherErr
     )
 }
 
-pub(crate) fn doctor_mcp(launcher_config: &LauncherConfig) -> Result<i32, LauncherError> {
-    if should_enter_running_flatpak_instance() {
-        return run_mcp_in_running_flatpak_instance(launcher_config, "doctor");
-    }
-    doctor_mcp_direct(launcher_config)
+#[derive(Clone, Copy)]
+pub(crate) enum McpDoctorOutput {
+    HumanReadable,
+    Json,
 }
 
-fn doctor_mcp_direct(launcher_config: &LauncherConfig) -> Result<i32, LauncherError> {
-    let finding = inspect_mcp_connection(launcher_config)?;
-    log_doctor_finding(&finding);
-    Ok(finding.exit_code())
-}
-
-fn should_enter_running_flatpak_instance() -> bool {
-    env::var_os("FLATPAK_ID").is_some() && env::var_os(FLATPAK_ENTERED_ENVIRONMENT).is_none()
-}
-
-pub(crate) fn route_auth_callback_if_needed(
+pub(crate) fn doctor_mcp(
     launcher_config: &LauncherConfig,
-    studio_arguments: &[String],
-) -> Result<Option<i32>, LauncherError> {
-    if !should_enter_running_flatpak_instance() {
-        return Ok(None);
-    }
-
-    let instance = wait_for_flatpak_studio_instance()?;
-    let launcher =
-        env::current_exe().map_err(|source| LauncherError::ResolveCurrentExecutable { source })?;
-    let mut command = Command::new(FLATPAK_SPAWN_PATH);
-    command.args(["--host", "flatpak", "enter"]);
-    command.arg(&instance);
-    command.arg("/usr/bin/env");
-    append_flatpak_enter_environment(&mut command, None);
-    command
-        .arg(launcher)
-        .arg("--config")
-        .arg(absolute_path(&launcher_config.config_path))
-        .arg("launch")
-        .args(studio_arguments);
-
-    tracing::debug!(
-        instance,
-        "Returning the browser login callback to the active Flatpak Studio sandbox"
-    );
-    let status = command
-        .status()
-        .map_err(|source| LauncherError::McpRuntimeUnavailable {
-            message: format!(
-                "could not enter the running Flatpak Studio sandbox for browser login: {source}"
-            ),
-        })?;
-    match status.code() {
-        Some(exit_code) => Ok(Some(exit_code)),
-        None => Err(LauncherError::McpRuntimeUnavailable {
-            message: "the Flatpak browser login callback exited without a status code".to_owned(),
-        }),
-    }
-}
-
-fn run_mcp_in_running_flatpak_instance(
-    launcher_config: &LauncherConfig,
-    action: &str,
+    output: McpDoctorOutput,
 ) -> Result<i32, LauncherError> {
-    let instance = wait_for_flatpak_studio_instance()?;
-    let launcher =
-        env::current_exe().map_err(|source| LauncherError::ResolveCurrentExecutable { source })?;
-    let status_path =
-        (action == "doctor").then(|| flatpak_status_path(&launcher_config.config_path));
-    if let Some(path) = &status_path {
-        let _ = fs::remove_file(path);
-    }
-    let mut command = Command::new(FLATPAK_SPAWN_PATH);
-    command.args(["--host", "flatpak", "enter"]);
-    command.arg(&instance);
-    command.arg("/usr/bin/env");
-    append_flatpak_enter_environment(&mut command, status_path.as_deref());
-    command
-        .arg(launcher)
-        .arg("--config")
-        .arg(absolute_path(&launcher_config.config_path))
-        .arg("mcp")
-        .arg(action);
-
-    tracing::debug!(
-        instance,
-        action,
-        "Running MCP inside the active Flatpak Studio sandbox"
-    );
-    let status = command
-        .status()
-        .map_err(|source| LauncherError::McpRuntimeUnavailable {
-            message: format!("could not enter the running Flatpak Studio sandbox: {source}"),
-        })?;
-    if let Some(path) = status_path {
-        return read_flatpak_status(path);
-    }
-    match status.code() {
-        Some(exit_code) => Ok(exit_code),
-        None => Err(LauncherError::McpRuntimeUnavailable {
-            message: "the Flatpak MCP process exited without a status code".to_owned(),
-        }),
-    }
-}
-
-fn flatpak_status_path(config_path: &Path) -> PathBuf {
-    let parent = config_path.parent().unwrap_or_else(|| Path::new("."));
-    parent.join(format!(".mcp-flatpak-status-{}", std::process::id()))
-}
-
-fn read_flatpak_status(path: PathBuf) -> Result<i32, LauncherError> {
-    let contents =
-        fs::read_to_string(&path).map_err(|source| LauncherError::McpRuntimeUnavailable {
-            message: format!("the Flatpak MCP doctor did not report its result: {source}"),
-        })?;
-    let _ = fs::remove_file(&path);
-    contents
-        .trim()
-        .parse::<i32>()
-        .map_err(|error| LauncherError::McpRuntimeUnavailable {
-            message: format!("the Flatpak MCP doctor reported an invalid exit code: {error}"),
-        })
-}
-
-fn wait_for_flatpak_studio_instance() -> Result<String, LauncherError> {
-    for attempt in 0..FLATPAK_ENTER_RETRY_COUNT {
-        if let Some(instance) = find_flatpak_studio_instance()? {
-            return Ok(instance);
-        }
-        if attempt + 1 < FLATPAK_ENTER_RETRY_COUNT {
-            thread::sleep(FLATPAK_ENTER_RETRY_DELAY);
-        }
-    }
-    Err(LauncherError::McpRuntimeUnavailable {
-        message: "Flatpak MCP needs the launcher GUI running with Roblox Studio open; start the GUI, open a place, and try again".to_owned(),
-    })
-}
-
-fn find_flatpak_studio_instance() -> Result<Option<String>, LauncherError> {
-    let output = run_host_flatpak(["ps", "--columns=instance,application"])?;
-    if !output.status.success() {
-        return Err(flatpak_host_failure(
-            "could not list running Flatpak instances",
-            output,
-        ));
-    }
-
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let mut fields = line.split_whitespace();
-        let Some(instance) = fields.next() else {
-            continue;
-        };
-        let Some(application) = fields.next() else {
-            continue;
-        };
-        if application != FLATPAK_APP_ID {
-            continue;
-        }
-        let process_output = run_host_flatpak(["enter", instance, "/usr/bin/ps", "-eo", "args="])?;
-        if process_output.status.success()
-            && String::from_utf8_lossy(&process_output.stdout)
-                .lines()
-                .any(is_studio_process_command_line)
-        {
-            return Ok(Some(instance.to_owned()));
-        }
-    }
-    Ok(None)
-}
-
-fn run_host_flatpak<const N: usize>(arguments: [&str; N]) -> Result<Output, LauncherError> {
-    Command::new(FLATPAK_SPAWN_PATH)
-        .arg("--host")
-        .arg("flatpak")
-        .args(arguments)
-        .output()
-        .map_err(|source| LauncherError::McpRuntimeUnavailable {
-            message: format!("could not query the Flatpak host: {source}"),
-        })
-}
-
-fn flatpak_host_failure(message: &str, output: Output) -> LauncherError {
-    let details = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    let message = if details.is_empty() {
-        message.to_owned()
-    } else {
-        format!("{message}: {details}")
+    let arguments = match output {
+        McpDoctorOutput::HumanReadable => vec![OsString::from("mcp"), OsString::from("doctor")],
+        McpDoctorOutput::Json => vec![
+            OsString::from("mcp"),
+            OsString::from("doctor"),
+            OsString::from("--json"),
+        ],
     };
-    LauncherError::McpRuntimeUnavailable { message }
+    let invocation =
+        ActiveStudioInvocation::reported(&launcher_config.config_path, arguments, "mcp-doctor");
+    if let Some(exit_code) = invocation.run_if_needed()? {
+        return Ok(exit_code);
+    }
+    doctor_mcp_direct(launcher_config, output)
 }
 
-fn append_flatpak_enter_environment(command: &mut Command, status_path: Option<&Path>) {
-    const ENVIRONMENT_KEYS: [&str; 14] = [
-        "HOME",
-        "PATH",
-        "XDG_RUNTIME_DIR",
-        "XDG_DATA_HOME",
-        "XDG_CONFIG_HOME",
-        "XDG_CACHE_HOME",
-        "DISPLAY",
-        "WAYLAND_DISPLAY",
-        "XDG_SESSION_TYPE",
-        "DBUS_SESSION_BUS_ADDRESS",
-        "XAUTHORITY",
-        "LANG",
-        "LANGUAGE",
-        "LC_ALL",
-    ];
-    for key in ENVIRONMENT_KEYS {
-        if let Some(value) = env::var_os(key) {
-            let mut assignment = std::ffi::OsString::from(key);
-            assignment.push("=");
-            assignment.push(value);
-            command.arg(assignment);
+fn doctor_mcp_direct(
+    launcher_config: &LauncherConfig,
+    output: McpDoctorOutput,
+) -> Result<i32, LauncherError> {
+    let finding = inspect_mcp_connection(launcher_config)?;
+    match output {
+        McpDoctorOutput::HumanReadable => log_doctor_finding(&finding),
+        McpDoctorOutput::Json => {
+            let serialized = serde_json::to_string(&finding)
+                .map_err(|source| LauncherError::SerializeMcpDoctorFinding { source })?;
+            // @why cli-output: this is the machine-readable subprocess boundary used by the GUI.
+            println!("{serialized}");
         }
     }
-    command.arg(format!("FLATPAK_ID={FLATPAK_APP_ID}"));
-    command.arg(format!("{FLATPAK_ENTERED_ENVIRONMENT}=1"));
-    if let Some(path) = status_path {
-        command.arg(format!(
-            "{FLATPAK_STATUS_PATH_ENVIRONMENT}={}",
-            path.display()
-        ));
-    }
+    Ok(finding.exit_code())
 }
 
 pub(crate) fn generate_client_configuration(
@@ -538,7 +363,7 @@ fn client_server_entry(launcher_config_path: &Path) -> Result<Value, LauncherErr
         Some(_) => vec![
             "run".to_owned(),
             "--command=roblox-studio-linux-launcher".to_owned(),
-            FLATPAK_APP_ID.to_owned(),
+            FLATPAK_APPLICATION_ID.to_owned(),
             "--config".to_owned(),
             launcher_path.display().to_string(),
             "mcp".to_owned(),
@@ -616,60 +441,10 @@ fn write_client_configuration(path: &Path, contents: &[u8]) -> Result<(), Launch
         })?;
     }
 
-    let stamp = match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(duration) => duration.as_nanos(),
-        Err(_) => 0,
-    };
-    let temporary_file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map_or("mcp", |name| name);
-    let temporary_path = parent.join(format!(
-        ".{}.tmp-{}-{}",
-        temporary_file_name,
-        std::process::id(),
-        stamp
-    ));
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temporary_path)
-        .map_err(|source| LauncherError::WriteMcpClientConfiguration {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    if let Err(source) = file.write_all(contents) {
-        remove_temporary_file(&temporary_path);
-        return Err(LauncherError::WriteMcpClientConfiguration {
-            path: path.to_path_buf(),
-            source,
-        });
-    }
-    if let Err(source) = file.sync_all() {
-        remove_temporary_file(&temporary_path);
-        return Err(LauncherError::WriteMcpClientConfiguration {
-            path: path.to_path_buf(),
-            source,
-        });
-    }
-    drop(file);
-    if let Err(source) = fs::rename(&temporary_path, path) {
-        remove_temporary_file(&temporary_path);
-        return Err(LauncherError::WriteMcpClientConfiguration {
-            path: path.to_path_buf(),
-            source,
-        });
-    }
-    Ok(())
-}
-
-fn remove_temporary_file(path: &Path) {
-    match fs::remove_file(path) {
-        Ok(()) => {}
-        Err(error) => {
-            tracing::debug!(path = %path.display(), error = %error, "Could not remove temporary MCP configuration file")
-        }
-    }
+    replace_file(path, contents).map_err(|source| LauncherError::WriteMcpClientConfiguration {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 fn next_backup_path(path: &Path) -> PathBuf {
@@ -786,39 +561,7 @@ impl McpProbe {
             "params": params
         });
         write_stdio_message(&mut self.stdin, message)?;
-        loop {
-            match self.events.recv_timeout(timeout) {
-                Ok(ProtocolEvent::Message(message)) => {
-                    if message.get("id") == Some(&json!(request_id)) {
-                        return protocol_result(message, method);
-                    }
-                }
-                Ok(ProtocolEvent::Ended) => {
-                    return Err(LauncherError::McpProtocolFailure {
-                        method: method.to_owned(),
-                        message: "StudioMCP closed its stdio stream".to_owned(),
-                    });
-                }
-                Ok(ProtocolEvent::Failed(message)) => {
-                    return Err(LauncherError::McpProtocolFailure {
-                        method: method.to_owned(),
-                        message,
-                    });
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    return Err(LauncherError::McpProtocolTimeout {
-                        method: method.to_owned(),
-                        timeout_seconds: timeout.as_secs(),
-                    });
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    return Err(LauncherError::McpProtocolFailure {
-                        method: method.to_owned(),
-                        message: "the StudioMCP reader stopped unexpectedly".to_owned(),
-                    });
-                }
-            }
-        }
+        wait_for_protocol_response(&self.events, request_id, method, timeout)
     }
 
     fn notify(&mut self, method: &str, params: Value) -> Result<(), LauncherError> {
@@ -847,6 +590,55 @@ impl McpProbe {
             return Ok(ToolCallReply::Error(extract_error_text(&result)));
         }
         Ok(ToolCallReply::Success(result))
+    }
+}
+
+fn wait_for_protocol_response(
+    events: &Receiver<ProtocolEvent>,
+    request_id: u64,
+    method: &str,
+    timeout: Duration,
+) -> Result<Value, LauncherError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(LauncherError::McpProtocolTimeout {
+                method: method.to_owned(),
+                timeout_seconds: timeout.as_secs(),
+            });
+        }
+        match events.recv_timeout(remaining) {
+            Ok(ProtocolEvent::Message(message)) => {
+                if message.get("id") == Some(&json!(request_id)) {
+                    return protocol_result(message, method);
+                }
+            }
+            Ok(ProtocolEvent::Ended) => {
+                return Err(LauncherError::McpProtocolFailure {
+                    method: method.to_owned(),
+                    message: "StudioMCP closed its stdio stream".to_owned(),
+                });
+            }
+            Ok(ProtocolEvent::Failed(message)) => {
+                return Err(LauncherError::McpProtocolFailure {
+                    method: method.to_owned(),
+                    message,
+                });
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                return Err(LauncherError::McpProtocolTimeout {
+                    method: method.to_owned(),
+                    timeout_seconds: timeout.as_secs(),
+                });
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(LauncherError::McpProtocolFailure {
+                    method: method.to_owned(),
+                    message: "the StudioMCP reader stopped unexpectedly".to_owned(),
+                });
+            }
+        }
     }
 }
 
@@ -1166,15 +958,6 @@ fn detect_studio_process() -> StudioProcessPresence {
     }
 }
 
-fn is_studio_process_command_line(command_line: &str) -> bool {
-    command_line.split_whitespace().any(|token| {
-        let token = token.trim_matches('"');
-        token == "RobloxStudioBeta.exe"
-            || token.ends_with("/RobloxStudioBeta.exe")
-            || token.ends_with("\\RobloxStudioBeta.exe")
-    })
-}
-
 fn studio_session_finding(wine_prefix: &Path) -> McpDoctorFinding {
     match detect_studio_process() {
         StudioProcessPresence::Running => match assistant_restart_hint(wine_prefix) {
@@ -1314,55 +1097,58 @@ fn assistant_restart_hint(wine_prefix: &Path) -> Option<PathBuf> {
     }
 }
 
-enum McpDoctorFinding {
-    WineUnavailable,
-    StudioUnavailable,
-    McpUnavailable { path: PathBuf },
-    ProcessUnavailable { message: String },
-    StudioNotRunning,
-    StudioPlaceNotOpen,
-    StudioNeedsSignIn,
-    StudioMcpNotEnabled,
-    RestartStudio { path: PathBuf },
-    StudioSessionUnavailable,
-    MultipleStudioSessions { count: usize },
-    Connected,
-}
-
-impl McpDoctorFinding {
-    fn exit_code(&self) -> i32 {
-        match self {
-            Self::Connected => 0,
-            Self::WineUnavailable
-            | Self::StudioUnavailable
-            | Self::McpUnavailable { .. }
-            | Self::ProcessUnavailable { .. }
-            | Self::StudioNotRunning
-            | Self::StudioPlaceNotOpen
-            | Self::StudioNeedsSignIn
-            | Self::StudioMcpNotEnabled
-            | Self::RestartStudio { .. }
-            | Self::StudioSessionUnavailable
-            | Self::MultipleStudioSessions { .. } => 1,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         extract_studio_ids, extract_tool_names, log_indicates_sign_in_required,
-        search_game_tree_arguments, setup_client_configuration, wait_for_studio_ids, ToolCallReply,
+        search_game_tree_arguments, setup_client_configuration, wait_for_protocol_response,
+        wait_for_studio_ids, ProtocolEvent, ToolCallReply,
     };
     use behave::prelude::*;
     use serde_json::{json, Value};
     use std::collections::VecDeque;
     use std::fs;
     use std::path::PathBuf;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     behave! {
         "Reading the open Studio connection" {
+            "unrelated protocol messages keep arriving" {
+                "still stops at the request's one total deadline" {
+                    let (sender, events) = mpsc::channel();
+                    let producer = thread::spawn(move || {
+                        let started = Instant::now();
+                        while started.elapsed() < Duration::from_millis(200) {
+                            if sender
+                                .send(ProtocolEvent::Message(json!({"id": 999_u64})))
+                                .is_err()
+                            {
+                                break;
+                            }
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                    });
+                    let started = Instant::now();
+                    let result = wait_for_protocol_response(
+                        &events,
+                        1,
+                        "test/request",
+                        Duration::from_millis(40),
+                    );
+                    let elapsed = started.elapsed();
+                    drop(events);
+                    expect!(producer.join()).to_be_ok()?;
+                    expect!(matches!(
+                        result,
+                        Err(crate::error::LauncherError::McpProtocolTimeout { .. })
+                    ))
+                    .to_be_true()?;
+                    expect!(elapsed < Duration::from_millis(120)).to_be_true()?;
+                }
+            }
+
             "keeps the Studio ID returned by the server" {
                 let response = json!({
                     "content": [{
