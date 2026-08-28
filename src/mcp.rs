@@ -19,6 +19,8 @@ const ROBLOX_MCP_SERVER_NAME: &str = "Roblox_Studio";
 const FLATPAK_APP_ID: &str = "io.github.checkpickerupper.RobloxStudioLinuxLauncher";
 const MCP_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 const MCP_TOOL_LIST_TIMEOUT: Duration = Duration::from_secs(5);
+const MCP_STUDIO_ATTACH_RETRY_COUNT: usize = 33;
+const MCP_STUDIO_ATTACH_RETRY_DELAY: Duration = Duration::from_millis(250);
 const MCP_STDIO_ARGUMENT: &str = "--stdio";
 const MCP_VERBOSE_ARGUMENT: &str = "--verbose";
 const FLATPAK_ENTERED_ENVIRONMENT: &str = "ROBLOX_LAUNCHER_FLATPAK_ENTERED";
@@ -412,29 +414,11 @@ fn inspect_mcp_connection(
     }
     probe.notify("notifications/initialized", json!({}))?;
 
-    let studios_result =
-        match probe.call_tool("list_roblox_studios", json!({}), MCP_PROBE_TIMEOUT)? {
-            ToolCallReply::Success(result) => result,
-            ToolCallReply::Error(message) => {
-                thread::sleep(Duration::from_millis(250));
-                match probe.call_tool("list_roblox_studios", json!({}), MCP_PROBE_TIMEOUT)? {
-                    ToolCallReply::Success(result) => result,
-                    ToolCallReply::Error(retry_message) => {
-                        tracing::debug!(
-                            first_error = %message,
-                            retry_error = %retry_message,
-                            "StudioMCP could not list Studio sessions"
-                        );
-                        return Ok(studio_session_finding(&launcher_config.wine_prefix));
-                    }
-                }
-            }
-        };
-    let studio_ids =
-        extract_studio_ids(&studios_result).ok_or_else(|| LauncherError::McpProtocolFailure {
-            method: "list_roblox_studios".to_owned(),
-            message: "the response did not contain a studios array".to_owned(),
-        })?;
+    let studio_ids = wait_for_studio_ids(
+        || probe.call_tool("list_roblox_studios", json!({}), MCP_PROBE_TIMEOUT),
+        MCP_STUDIO_ATTACH_RETRY_COUNT,
+        MCP_STUDIO_ATTACH_RETRY_DELAY,
+    )?;
     match studio_ids.len() {
         0 => Ok(studio_session_finding(&launcher_config.wine_prefix)),
         count if count > 1 => Ok(McpDoctorFinding::MultipleStudioSessions { count }),
@@ -1031,6 +1015,42 @@ fn extract_studio_ids(result: &Value) -> Option<Vec<String>> {
     Some(ids)
 }
 
+fn wait_for_studio_ids<F>(
+    mut list_studios: F,
+    max_attempts: usize,
+    retry_delay: Duration,
+) -> Result<Vec<String>, LauncherError>
+where
+    F: FnMut() -> Result<ToolCallReply, LauncherError>,
+{
+    let max_attempts = max_attempts.max(1);
+    let mut last_error = None;
+    for attempt in 0..max_attempts {
+        match list_studios()? {
+            ToolCallReply::Success(result) => {
+                let studio_ids = extract_studio_ids(&result).ok_or_else(|| {
+                    LauncherError::McpProtocolFailure {
+                        method: "list_roblox_studios".to_owned(),
+                        message: "the response did not contain a studios array".to_owned(),
+                    }
+                })?;
+                if !studio_ids.is_empty() {
+                    return Ok(studio_ids);
+                }
+            }
+            ToolCallReply::Error(error) => last_error = Some(error),
+        }
+
+        if attempt + 1 < max_attempts {
+            thread::sleep(retry_delay);
+        }
+    }
+    if let Some(error) = last_error {
+        tracing::debug!(%error, "StudioMCP could not list Studio sessions");
+    }
+    Ok(Vec::new())
+}
+
 fn extract_tool_names(result: &Value) -> Option<Vec<String>> {
     let document = extract_tool_document(result);
     let tools = document.get("tools")?.as_array()?;
@@ -1264,13 +1284,14 @@ impl McpDoctorFinding {
 mod tests {
     use super::{
         extract_studio_ids, extract_tool_names, log_indicates_sign_in_required,
-        setup_client_configuration,
+        setup_client_configuration, wait_for_studio_ids, ToolCallReply,
     };
     use behave::prelude::*;
     use serde_json::{json, Value};
+    use std::collections::VecDeque;
     use std::fs;
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     behave! {
         "Reading the open Studio connection" {
@@ -1302,6 +1323,45 @@ mod tests {
 
             "reports an unusable response when the server omits its list" {
                 expect!(extract_studio_ids(&json!({"content": []}))).to_be_none()?;
+            }
+
+            "waits for Studio's next connection attempt" {
+                let mut replies = VecDeque::from([
+                    ToolCallReply::Success(json!({
+                        "content": [{
+                            "type": "text",
+                            "text": "{\"studios\":[]}"
+                        }]
+                    })),
+                    ToolCallReply::Success(json!({
+                        "content": [{
+                            "type": "text",
+                            "text": "{\"studios\":[{\"id\":\"studio-one\",\"name\":\"Test place\"}]}"
+                        }]
+                    })),
+                ]);
+                let mut calls = 0;
+                let studio_ids = match wait_for_studio_ids(
+                    || {
+                        calls += 1;
+                        match replies.pop_front() {
+                            Some(reply) => Ok(reply),
+                            None => Ok(ToolCallReply::Success(json!({
+                                "content": [{"type": "text", "text": "{\"studios\":[]}"}]
+                            }))),
+                        }
+                    },
+                    2,
+                    Duration::ZERO,
+                ) {
+                    Ok(studio_ids) => studio_ids,
+                    Err(error) => {
+                        expect!(format!("Studio discovery failed: {error}")).to_be_empty()?;
+                        return Ok(());
+                    }
+                };
+                expect!(calls).to_equal(2)?;
+                expect!(studio_ids).to_equal(vec!["studio-one".to_owned()])?;
             }
 
             "recognizes when Studio is waiting for sign-in" {
