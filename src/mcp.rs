@@ -447,24 +447,21 @@ fn inspect_mcp_connection(
                     });
                 }
             }
-            match probe.call_tool(
+            let studio_state = match probe.call_tool(
                 "get_studio_state",
                 json!({ "studio_id": studio_id }),
                 MCP_PROBE_TIMEOUT,
             )? {
-                ToolCallReply::Success(_) => {}
+                ToolCallReply::Success(result) => result,
                 ToolCallReply::Error(message) => {
                     return Err(LauncherError::McpProtocolFailure {
                         method: "tools/call:get_studio_state".to_owned(),
                         message,
                     });
                 }
-            }
-            match probe.call_tool(
-                "search_game_tree",
-                json!({ "studio_id": studio_id }),
-                MCP_PROBE_TIMEOUT,
-            )? {
+            };
+            let search_arguments = search_game_tree_arguments(studio_id, &studio_state)?;
+            match probe.call_tool("search_game_tree", search_arguments, MCP_PROBE_TIMEOUT)? {
                 ToolCallReply::Success(_) => {}
                 ToolCallReply::Error(message) => {
                     return Err(LauncherError::McpProtocolFailure {
@@ -1015,6 +1012,77 @@ fn extract_studio_ids(result: &Value) -> Option<Vec<String>> {
     Some(ids)
 }
 
+fn search_game_tree_arguments(
+    studio_id: &str,
+    studio_state: &Value,
+) -> Result<Value, LauncherError> {
+    let data_model = studio_data_model_from_state(studio_state).ok_or_else(|| {
+        LauncherError::McpProtocolFailure {
+            method: "tools/call:get_studio_state".to_owned(),
+            message: "the response did not identify an available Studio DataModel".to_owned(),
+        }
+    })?;
+    Ok(json!({
+        "studio_id": studio_id,
+        "datamodel_type": data_model.as_tool_argument()
+    }))
+}
+
+fn studio_data_model_from_state(studio_state: &Value) -> Option<StudioDataModel> {
+    const STATE_LABELS: [&str; 3] = [
+        "Focused DataModel in the viewport:",
+        "Current Studio Mode:",
+        "Available DataModels:",
+    ];
+    let content = studio_state.get("content")?.as_array()?;
+    for label in STATE_LABELS {
+        for item in content {
+            let Some(text) = item.get("text").and_then(Value::as_str) else {
+                continue;
+            };
+            for line in text.lines() {
+                let line = line.trim().strip_prefix("- ").unwrap_or(line.trim());
+                let Some(value) = line.strip_prefix(label) else {
+                    continue;
+                };
+                if let Some(data_model) = value
+                    .split(|character: char| !character.is_ascii_alphabetic())
+                    .find_map(StudioDataModel::from_tool_argument)
+                {
+                    return Some(data_model);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StudioDataModel {
+    Edit,
+    Client,
+    Server,
+}
+
+impl StudioDataModel {
+    fn from_tool_argument(value: &str) -> Option<Self> {
+        match value {
+            "Edit" => Some(Self::Edit),
+            "Client" => Some(Self::Client),
+            "Server" => Some(Self::Server),
+            _ => None,
+        }
+    }
+
+    const fn as_tool_argument(self) -> &'static str {
+        match self {
+            Self::Edit => "Edit",
+            Self::Client => "Client",
+            Self::Server => "Server",
+        }
+    }
+}
+
 fn wait_for_studio_ids<F>(
     mut list_studios: F,
     max_attempts: usize,
@@ -1284,7 +1352,7 @@ impl McpDoctorFinding {
 mod tests {
     use super::{
         extract_studio_ids, extract_tool_names, log_indicates_sign_in_required,
-        setup_client_configuration, wait_for_studio_ids, ToolCallReply,
+        search_game_tree_arguments, setup_client_configuration, wait_for_studio_ids, ToolCallReply,
     };
     use behave::prelude::*;
     use serde_json::{json, Value};
@@ -1319,6 +1387,28 @@ mod tests {
                     "get_studio_state".to_owned(),
                     "search_game_tree".to_owned(),
                 ]))?;
+            }
+
+            "uses Studio's focused DataModel when inspecting the game tree" {
+                let studio_state = json!({
+                    "content": [{
+                        "type": "text",
+                        "text": "- Current Studio Mode: Edit\n- Available DataModels: Edit\n- Focused DataModel in the viewport: Edit"
+                    }],
+                    "isError": false
+                });
+                let arguments = match search_game_tree_arguments("studio-one", &studio_state) {
+                    Ok(arguments) => arguments,
+                    Err(error) => {
+                        expect!(format!("tree arguments failed: {error}"))
+                            .to_be_empty()?;
+                        return Ok(());
+                    }
+                };
+                expect!(arguments).to_equal(json!({
+                    "studio_id": "studio-one",
+                    "datamodel_type": "Edit"
+                }))?;
             }
 
             "reports an unusable response when the server omits its list" {
