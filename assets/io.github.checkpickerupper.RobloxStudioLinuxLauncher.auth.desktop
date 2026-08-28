@@ -1,10 +1,10 @@
 [Desktop Entry]
 Type=Application
-Name=Roblox Studio (Unofficial Linux Launcher)
-Comment=Launch Roblox Studio through Wine
+Name=Roblox Studio Linux Launcher (Browser Login)
+Comment=Return Roblox Studio browser login to the launcher
 Exec=roblox-studio-linux-launcher launch %u
 Icon=io.github.checkpickerupper.RobloxStudioLinuxLauncher
 Terminal=false
-Categories=Development;
+NoDisplay=true
 StartupWMClass=roblox-studio-linux-launcher
 MimeType=x-scheme-handler/roblox-studio-auth;

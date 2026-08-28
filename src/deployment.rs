@@ -14,6 +14,7 @@ const CDN_CHANNEL_PATH: &str = "https://setup.rbxcdn.com/channel/common";
 const MANIFEST_SUFFIX: &str = "rbxPkgManifest.txt";
 const INSTALLER_SUFFIX: &str = "RobloxStudioInstaller.exe";
 const STUDIO_EXECUTABLE: &str = "RobloxStudioBeta.exe";
+const MCP_EXECUTABLE: &str = "StudioMCP.exe";
 const INSTALLATION_MARKER: &str = ".roblox-studio-deployment-complete-v4";
 const APP_SETTINGS_FILE: &str = "AppSettings.xml";
 const APP_SETTINGS_CONTENT: &str = concat!(
@@ -55,9 +56,14 @@ pub(crate) fn install_latest_studio(wine_prefix: &Path) -> Result<PathBuf, Launc
         .join("Versions")
         .join(&deployment.client_version_upload);
     let studio_executable = version_directory.join(STUDIO_EXECUTABLE);
+    let mcp_executable = version_directory.join(MCP_EXECUTABLE);
     let installation_marker = version_directory.join(INSTALLATION_MARKER);
     let app_settings = version_directory.join(APP_SETTINGS_FILE);
-    if studio_executable.is_file() && installation_marker.is_file() && app_settings.is_file() {
+    if studio_executable.is_file()
+        && mcp_executable.is_file()
+        && installation_marker.is_file()
+        && app_settings.is_file()
+    {
         tracing::info!(
             path = %studio_executable.display(),
             "Current Studio deployment is already installed"
@@ -155,6 +161,12 @@ pub(crate) fn install_latest_studio(wine_prefix: &Path) -> Result<PathBuf, Launc
     if !staged_studio_executable.is_file() {
         return Err(LauncherError::MissingStudioExecutable {
             path: staged_studio_executable,
+        });
+    }
+    let staged_mcp_executable = staging_directory.join(MCP_EXECUTABLE);
+    if !staged_mcp_executable.is_file() {
+        return Err(LauncherError::MissingStudioMcpExecutable {
+            path: staged_mcp_executable,
         });
     }
     let staged_app_settings = staging_directory.join(APP_SETTINGS_FILE);

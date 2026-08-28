@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Roblox Studio Linux Launcher
+Comment=Install and launch Roblox Studio through Wine
+Exec=roblox-studio-linux-launcher gui
+Icon=io.github.checkpickerupper.RobloxStudioLinuxLauncher
+Terminal=false
+Categories=Development;Game;
+StartupNotify=true
+StartupWMClass=roblox-studio-linux-launcher

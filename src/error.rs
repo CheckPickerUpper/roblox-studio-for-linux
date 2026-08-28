@@ -10,6 +10,8 @@ pub enum LauncherError {
         message: String,
         provided_arguments: Vec<String>,
     },
+    #[error("could not start the graphical launcher: {message}")]
+    GuiStartup { message: String },
     #[error("invalid configuration at {path} line {line}: {message}")]
     InvalidConfig {
         path: PathBuf,
@@ -30,6 +32,12 @@ pub enum LauncherError {
     },
     #[error("could not create Wine prefix {path}: {source}")]
     CreateWinePrefix {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("could not read Wine registry {path}: {source}")]
+    ReadWineRegistry {
         path: PathBuf,
         #[source]
         source: io::Error,
@@ -65,10 +73,80 @@ pub enum LauncherError {
     },
     #[error("Wine process {program} exited without a status code")]
     WineProcessExitedWithoutCode { program: String },
-    #[error("WebView2 installer {path} is unavailable")]
-    MissingWebView2Installer { path: PathBuf },
+    #[error("managed Wine window-driver setup exited with status {exit_code}")]
+    WineGraphicsConfigurationFailed { exit_code: i32 },
+    #[error(
+        "Wine is already running in {prefix}; refusing to change its window driver from {saved_driver} to {desired_driver} because that would close Studio"
+    )]
+    WineGraphicsChangeWhileRunning {
+        prefix: PathBuf,
+        saved_driver: String,
+        desired_driver: String,
+    },
+    #[error("Wine server check {program} exited with status {exit_code}")]
+    WineServerCheckFailed { program: String, exit_code: i32 },
     #[error("WebView2 runtime was not found under {path} after installation")]
     MissingWebView2Runtime { path: PathBuf },
+    #[error("could not prepare the managed WebView2 runtime: {message}")]
+    PrepareWebView2Runtime { message: String },
+    #[error("could not run the managed WebView2 download: {source}")]
+    RunWebView2Download {
+        #[source]
+        source: io::Error,
+    },
+    #[error("managed WebView2 download exited with status {exit_code}")]
+    WebView2DownloadFailed { exit_code: String },
+    #[error("could not parse managed WebView2 download information: {source}")]
+    ParseWebView2Download {
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("could not read managed WebView2 file {path}: {source}")]
+    ReadWebView2File {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("could not write managed WebView2 file {path}: {source}")]
+    WriteWebView2File {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("managed DXVK files are missing from {path}")]
+    MissingManagedDxvk { path: PathBuf },
+    #[error("could not prepare managed DXVK file {path}: {source}")]
+    PrepareManagedDxvkFile {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("could not read Studio client settings {path}: {source}")]
+    ReadStudioClientSettings {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("could not parse Studio client settings {path}: {source}")]
+    ParseStudioClientSettings {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("Studio client settings {path} are invalid: {message}")]
+    InvalidStudioClientSettings { path: PathBuf, message: String },
+    #[error("could not create Studio client settings directory {path}: {source}")]
+    CreateStudioClientSettingsDirectory {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("could not write Studio client settings {path}: {source}")]
+    WriteStudioClientSettings {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
     #[error("could not resolve the current launcher executable: {source}")]
     ResolveCurrentExecutable {
         #[source]
@@ -86,6 +164,21 @@ pub enum LauncherError {
         #[source]
         source: io::Error,
     },
+    #[error("could not write launcher icon {path}: {source}")]
+    WriteDesktopIcon {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("could not open the Roblox sign-in page in the browser: {source}")]
+    OpenBrowser {
+        #[source]
+        source: io::Error,
+    },
+    #[error("browser sign-in opener exited with status {exit_code}")]
+    BrowserOpenFailed { exit_code: String },
+    #[error("could not inspect Studio browser history {path}: {message}")]
+    ReadBrowserHistory { path: PathBuf, message: String },
     #[error("could not run {program} to register the browser login handler: {source}")]
     RunDesktopRegistration {
         program: String,
@@ -281,6 +374,50 @@ pub enum LauncherError {
     },
     #[error("latest deployment did not contain {path}")]
     MissingStudioExecutable { path: PathBuf },
+    #[error("latest deployment did not contain the matching Studio MCP executable {path}")]
+    MissingStudioMcpExecutable { path: PathBuf },
+    #[error("the selected Studio installation has no matching StudioMCP.exe at {path}")]
+    MissingMcpExecutable { path: PathBuf },
+    #[error("MCP runtime is unavailable: {message}")]
+    McpRuntimeUnavailable { message: String },
+    #[error("MCP protocol request {method} failed: {message}")]
+    McpProtocolFailure { method: String, message: String },
+    #[error("MCP protocol request {method} timed out after {timeout_seconds} seconds")]
+    McpProtocolTimeout {
+        method: String,
+        timeout_seconds: u64,
+    },
+    #[error("MCP client configuration at {path} is invalid: {message}")]
+    InvalidMcpClientConfiguration { path: PathBuf, message: String },
+    #[error("could not read MCP client configuration {path}: {source}")]
+    ReadMcpClientConfiguration {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("could not parse MCP client configuration {path}: {source}")]
+    ParseMcpClientConfiguration {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("could not serialize MCP client configuration: {source}")]
+    SerializeMcpClientConfiguration {
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("could not back up MCP client configuration {path}: {source}")]
+    BackupMcpClientConfiguration {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("could not write MCP client configuration {path}: {source}")]
+    WriteMcpClientConfiguration {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
     #[error("could not write deployment completion marker {path}: {source}")]
     WriteDeploymentMarker {
         path: PathBuf,

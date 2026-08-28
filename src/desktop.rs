@@ -5,56 +5,80 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const DESKTOP_FILENAME: &str = "roblox-studio-linux-launcher.desktop";
+const DESKTOP_FILENAME: &str = "io.github.checkpickerupper.RobloxStudioLinuxLauncher.auth.desktop";
+const GUI_DESKTOP_FILENAME: &str = "io.github.checkpickerupper.RobloxStudioLinuxLauncher.desktop";
 const AUTH_HANDLER: &str = "x-scheme-handler/roblox-studio-auth";
 const MIME_CACHE_FILENAME: &str = "mimeinfo.cache";
 const XDG_MIME_COMMAND: &str = "xdg-mime";
+const FLATPAK_SPAWN_PATH: &str = "/usr/bin/flatpak-spawn";
+const ICON_FILENAME: &str = "io.github.checkpickerupper.RobloxStudioLinuxLauncher.png";
+const ICON_BYTES: &[u8] =
+    include_bytes!("../assets/io.github.checkpickerupper.RobloxStudioLinuxLauncher.png");
+const GUI_DESKTOP_ENTRY: &str =
+    include_str!("../assets/io.github.checkpickerupper.RobloxStudioLinuxLauncher.desktop");
+#[cfg(test)]
+const AUTH_DESKTOP_ENTRY: &str =
+    include_str!("../assets/io.github.checkpickerupper.RobloxStudioLinuxLauncher.auth.desktop");
 
 pub(crate) fn register_auth_handler() -> Result<(), LauncherError> {
-    let executable =
-        env::current_exe().map_err(|source| LauncherError::ResolveCurrentExecutable { source })?;
-    let applications_directory = data_directory().join("applications");
-    fs::create_dir_all(&applications_directory).map_err(|source| {
-        LauncherError::CreateDesktopDirectory {
-            path: applications_directory.clone(),
-            source,
-        }
-    })?;
+    let in_flatpak = env::var_os("FLATPAK_ID").is_some();
+    if !in_flatpak {
+        let executable = env::current_exe()
+            .map_err(|source| LauncherError::ResolveCurrentExecutable { source })?;
+        let applications_directory = data_directory().join("applications");
+        fs::create_dir_all(&applications_directory).map_err(|source| {
+            LauncherError::CreateDesktopDirectory {
+                path: applications_directory.clone(),
+                source,
+            }
+        })?;
 
-    let desktop_path = applications_directory.join(DESKTOP_FILENAME);
-    let desktop_contents = desktop_entry(&executable);
-    fs::write(&desktop_path, desktop_contents).map_err(|source| {
-        LauncherError::WriteDesktopEntry {
-            path: desktop_path.clone(),
-            source,
-        }
-    })?;
-    update_mime_cache(&applications_directory.join(MIME_CACHE_FILENAME))?;
+        install_launcher_icon()?;
 
-    let status = Command::new(XDG_MIME_COMMAND)
+        let gui_desktop_path = applications_directory.join(GUI_DESKTOP_FILENAME);
+        fs::write(&gui_desktop_path, GUI_DESKTOP_ENTRY).map_err(|source| {
+            LauncherError::WriteDesktopEntry {
+                path: gui_desktop_path,
+                source,
+            }
+        })?;
+
+        let desktop_path = applications_directory.join(DESKTOP_FILENAME);
+        let desktop_contents = desktop_entry(&executable);
+        fs::write(&desktop_path, desktop_contents).map_err(|source| {
+            LauncherError::WriteDesktopEntry {
+                path: desktop_path,
+                source,
+            }
+        })?;
+        update_mime_cache(&applications_directory.join(MIME_CACHE_FILENAME))?;
+    }
+
+    let program = xdg_mime_program(in_flatpak);
+    let status = xdg_mime_command(in_flatpak)
         .args(["default", DESKTOP_FILENAME, AUTH_HANDLER])
         .status()
         .map_err(|source| LauncherError::RunDesktopRegistration {
-            program: XDG_MIME_COMMAND.to_owned(),
+            program: program.to_owned(),
             source,
         })?;
     if !status.success() {
         return Err(LauncherError::DesktopRegistrationFailed {
-            program: XDG_MIME_COMMAND.to_owned(),
+            program: program.to_owned(),
             exit_code: status.code().unwrap_or(1),
         });
     }
 
-    let query = Command::new(XDG_MIME_COMMAND)
+    let query = xdg_mime_command(in_flatpak)
         .args(["query", "default", AUTH_HANDLER])
         .output()
         .map_err(|source| LauncherError::RunDesktopRegistration {
-            program: XDG_MIME_COMMAND.to_owned(),
+            program: program.to_owned(),
             source,
         })?;
     if !query.status.success() {
         return Err(LauncherError::DesktopRegistrationFailed {
-            program: XDG_MIME_COMMAND.to_owned(),
+            program: program.to_owned(),
             exit_code: query.status.code().unwrap_or(1),
         });
     }
@@ -68,10 +92,28 @@ pub(crate) fn register_auth_handler() -> Result<(), LauncherError> {
     }
 
     tracing::info!(
-        path = %desktop_path.display(),
+        handler = DESKTOP_FILENAME,
         "Registered Roblox Studio browser login handler"
     );
     Ok(())
+}
+
+fn xdg_mime_command(in_flatpak: bool) -> Command {
+    if in_flatpak {
+        let mut command = Command::new(FLATPAK_SPAWN_PATH);
+        command.args(["--host", XDG_MIME_COMMAND]);
+        command
+    } else {
+        Command::new(XDG_MIME_COMMAND)
+    }
+}
+
+const fn xdg_mime_program(in_flatpak: bool) -> &'static str {
+    if in_flatpak {
+        "flatpak-spawn --host xdg-mime"
+    } else {
+        XDG_MIME_COMMAND
+    }
 }
 
 fn data_directory() -> PathBuf {
@@ -80,6 +122,25 @@ fn data_directory() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn install_launcher_icon() -> Result<(), LauncherError> {
+    let icon_directory = data_directory()
+        .join("icons")
+        .join("hicolor")
+        .join("512x512")
+        .join("apps");
+    fs::create_dir_all(&icon_directory).map_err(|source| {
+        LauncherError::CreateDesktopDirectory {
+            path: icon_directory.clone(),
+            source,
+        }
+    })?;
+    let icon_path = icon_directory.join(ICON_FILENAME);
+    fs::write(&icon_path, ICON_BYTES).map_err(|source| LauncherError::WriteDesktopIcon {
+        path: icon_path,
+        source,
+    })
 }
 
 fn update_mime_cache(path: &Path) -> Result<(), LauncherError> {
@@ -153,9 +214,10 @@ fn desktop_entry(executable: &Path) -> String {
          Name=Roblox Studio (Unofficial Linux Launcher)\n\
          Comment=Launch Roblox Studio through Wine\n\
          Exec={} launch %u\n\
-         Icon=application-x-executable\n\
+         Icon=io.github.checkpickerupper.RobloxStudioLinuxLauncher\n\
          Terminal=false\n\
          Categories=Development;\n\
+         StartupWMClass=roblox-studio-linux-launcher\n\
          MimeType={AUTH_HANDLER};\n",
         desktop_exec_value(executable),
     )
@@ -180,4 +242,38 @@ fn desktop_exec_value(executable: &Path) -> String {
     }
     value.push('"');
     value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{xdg_mime_command, AUTH_DESKTOP_ENTRY};
+    use behave::prelude::*;
+
+    behave! {
+        "Returning from browser sign-in" {
+            "the packaged Flatpak callback entry" {
+                "starts the launcher command inside the sandbox" {
+                    expect!(AUTH_DESKTOP_ENTRY.contains(
+                        "Exec=roblox-studio-linux-launcher launch %u"
+                    )).to_be_true()?;
+                    expect!(AUTH_DESKTOP_ENTRY.contains("flatpak run")).to_be_false()?;
+                }
+            }
+
+            "the launcher is running inside Flatpak" {
+                "registers and verifies the callback on the Linux host" {
+                    let command = xdg_mime_command(true);
+                    let program = command.get_program().to_string_lossy().into_owned();
+                    let arguments = command
+                        .get_args()
+                        .map(|argument| argument.to_string_lossy().into_owned())
+                        .collect::<Vec<_>>();
+
+                    expect!(program).to_equal("/usr/bin/flatpak-spawn".to_owned())?;
+                    expect!(arguments)
+                        .to_equal(vec!["--host".to_owned(), "xdg-mime".to_owned()])?;
+                }
+            }
+        }
+    }
 }

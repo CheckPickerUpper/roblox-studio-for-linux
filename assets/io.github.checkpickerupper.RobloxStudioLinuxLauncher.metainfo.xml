@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.checkpickerupper.RobloxStudioLinuxLauncher</id>
+  <name>Roblox Studio Linux Launcher</name>
+  <summary>Install and open Roblox Studio on Linux</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LicenseRef-proprietary</project_license>
+  <developer id="io.github.checkpickerupper">
+    <name>CheckPickerUpper</name>
+  </developer>
+  <description>
+    <p>
+      Install, update, and open the Windows build of Roblox Studio on Linux
+      using the launcher&apos;s managed Wine, WebView2, and graphics runtimes.
+    </p>
+    <p>
+      The launcher also checks the Studio installation, provides recovery
+      information, and connects supported AI clients to Studio&apos;s MCP server.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.checkpickerupper.RobloxStudioLinuxLauncher.desktop</launchable>
+  <url type="homepage">https://github.com/CheckPickerUpper/roblox-studio-for-linux</url>
+  <url type="bugtracker">https://github.com/CheckPickerUpper/roblox-studio-for-linux/issues</url>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-08-26"/>
+  </releases>
+</component>

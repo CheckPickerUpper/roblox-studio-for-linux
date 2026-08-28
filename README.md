@@ -11,10 +11,14 @@ Roblox officially supports Studio on Windows and macOS. This project does not pr
 - Installs the current official Windows Studio deployment directly into that prefix.
 - Keeps the official bootstrapper available as an explicit `--installer` fallback.
 - Finds the newest installed `RobloxStudioBeta.exe` on every launch.
-- Configures the Wine prefix for Studio and installs its WebView2 runtime when needed.
+- Configures the Wine prefix for Studio, installs WebView2 when needed, and repairs the
+  WebView2 registry entry that Wine's installer can leave missing.
 - Registers the `roblox-studio-auth:` browser callback with the Linux desktop.
 - Launches Studio through Wine and forwards Studio command-line arguments.
+- Connects AI clients to Roblox Studio's built-in MCP process without replacing it.
+- Verifies the matching Studio version, MCP executable, Wine prefix, and live Studio session.
 - Includes a desktop-entry template for a clickable launcher.
+- Includes a graphical launcher with install, update, launch, MCP connection checks, diagnostics, and settings actions.
 
 ## Dependencies
 
@@ -23,7 +27,11 @@ Required system software:
 - Linux
 - Rust stable and Cargo
 - Wine, installed through your Linux distribution
-- Winetricks with the `corefonts` and `vcrun2019` verbs available
+- Winetricks with the `corefonts`, `vcrun2019`, and `dxvk` verbs available
+
+These dependencies describe the native Cargo installation. The Flatpak build
+contains one managed Kombucha Wine runtime and keeps its prefix inside the
+Flatpak data directory. It does not also include the `org.winehq.Wine` base.
 
 The launcher downloads and verifies the current Studio packages from Roblox's official deployment endpoints. It does not require a manually downloaded installer for the normal path.
 
@@ -34,6 +42,12 @@ Install the launcher command:
 ```bash
 cargo install --path .
 roblox-studio-linux-launcher doctor
+```
+
+Open the graphical launcher with:
+
+```bash
+roblox-studio-linux-launcher gui
 ```
 
 During development, run it without installing:
@@ -48,7 +62,7 @@ cargo run -- doctor
 
    ```bash
    WINEPREFIX="$HOME/.local/share/roblox-studio-linux-launcher/wine" \
-     winetricks --unattended corefonts vcrun2019
+     winetricks --unattended corefonts vcrun2019 dxvk
    ```
 
 2. Install the current Studio deployment directly:
@@ -74,7 +88,57 @@ cargo run -- doctor
    roblox-studio-linux-launcher launch
    ```
 
+The launcher uses Studio's own sign-in window by default. Its managed WebView2
+setup uses WebView2's built-in SwiftShader renderer instead of Wine's hanging
+D3D11 software path. If that window still cannot render on a particular system,
+use the Linux-browser backup with `roblox-studio-linux-launcher browser-login`,
+or save that choice with `roblox-studio-linux-launcher configure --browser-login`.
+
+On a Wayland desktop with XWayland available, Wine keeps its mature X11 window
+driver. The native Wine Wayland path currently lacks desktop icon and clipboard
+features and did not prevent Studio's plugin-window swapchain failure in live
+testing. The launcher saves that driver order in the Wine prefix before Studio
+starts and restarts a stale Wine session once when the saved choice changes.
+
 Rerun `install` to check for and install a newer Studio deployment. Normal launches discover the newest installed Studio executable instead of pinning launches to an older version directory. The default data directory is `~/.local/share/roblox-studio-linux-launcher`. Use `--config` to keep the configuration somewhere else.
+
+## Connect an AI client through Studio MCP
+
+Roblox Studio already contains the MCP server. This launcher only supplies the
+Linux/Wine process bridge that AI clients need; it does not create a replacement
+server or use the old standalone MCP project.
+
+1. Launch Studio and open a place.
+2. In Studio, open `Assistant` → `…` → `Manage MCP Servers` and enable
+   `Enable Studio as MCP server`.
+3. Add the launcher to an MCP client's JSON configuration. To merge it into an
+   existing JSON file while preserving other servers and creating a backup:
+
+   ```bash
+   roblox-studio-linux-launcher mcp setup \
+     --client-config ~/.config/your-client/mcp.json
+   ```
+
+   To print a configuration without editing a file:
+
+   ```bash
+   roblox-studio-linux-launcher mcp setup --print
+   ```
+
+4. Restart the AI client, then verify the live connection:
+
+   ```bash
+   roblox-studio-linux-launcher mcp doctor
+   ```
+
+`mcp doctor` checks `list_roblox_studios`, `get_studio_state`, and
+`search_game_tree`. It distinguishes a missing Wine installation, missing
+Studio/MCP files, Studio not running, Studio waiting for sign-in, Studio
+running without MCP enabled, multiple Studio sessions, and a verified
+connection. `mcp serve` is the command
+an AI client invokes; it passes stdin/stdout directly to the exact
+`StudioMCP.exe` beside the selected `RobloxStudioBeta.exe`, with diagnostics on
+stderr so protocol output stays clean.
 
 If Roblox changes the direct deployment service, a manually downloaded bootstrapper can still be run explicitly:
 
@@ -82,17 +146,29 @@ If Roblox changes the direct deployment service, a manually downloaded bootstrap
 roblox-studio-linux-launcher install --installer ~/Downloads/RobloxStudioLauncherBeta.exe
 ```
 
-If Studio is installed outside the launcher's Wine prefix, configure it as a fallback:
+If Studio is installed outside the launcher's Wine prefix, you can configure it as a launch-only fallback:
 
 ```bash
 roblox-studio-linux-launcher configure --studio-executable /path/to/RobloxStudioBeta.exe
 ```
 
+The MCP commands do not use that outside-prefix fallback. They only connect to
+the `StudioMCP.exe` beside the selected Studio version in the configured prefix,
+so Studio and MCP cannot accidentally come from different installations.
+
 Additional arguments after `launch` are passed to Studio.
 
-## Browser login
+## Studio login
 
-Studio starts login in the external browser when Wine's embedded WebView2 renderer cannot load Roblox's login page. The browser returns through the `roblox-studio-auth:` URI, which the launcher's registered desktop entry forwards to Studio.
+The launcher installs the matching WebView2 runtime and uses Studio's own sign-in
+window. Browser mode is the backup: it opens Studio's one-time authorization URL
+in the Linux browser, then returns through the `roblox-studio-auth:` URI. The
+launcher's registered desktop entry forwards that callback to the already-running
+Flatpak Studio sandbox. Browser mode verifies that handler and waits until the
+authorization page actually opens before reporting success.
+
+Use `configure --embedded-webview` to return to the normal in-Studio page after
+testing browser mode.
 
 On WSL, use a Linux browser inside WSL for this callback path. A Windows browser uses Windows' protocol registry and cannot invoke the WSL desktop entry.
 
@@ -119,6 +195,7 @@ Vinegar is GPL-3.0 licensed. We study its behavior and reimplement the needed id
 Roblox:
 
 - [Studio setup](https://create.roblox.com/docs/studio/setup): official supported platforms and system requirements.
+- [Studio MCP](https://create.roblox.com/docs/studio/mcp): official built-in MCP server, tools, Studio toggle, and client setup.
 - [Studio command-line interface](https://create.roblox.com/docs/studio/command-line-interface): official launch arguments and executable locations.
 
 Linux and Wine:
@@ -134,6 +211,13 @@ Rust:
 - [The Cargo Book](https://doc.rust-lang.org/cargo/): build, run, and package this launcher.
 
 ## Desktop launcher
+
+The GUI desktop entry is available at
+`assets/io.github.checkpickerupper.RobloxStudioLinuxLauncher.desktop`.
+The existing registered desktop entry remains dedicated to the `roblox-studio-auth:`
+browser callback, so browser login continues to work while the GUI is open from the
+desktop menu.
+
 `install` and `launch` register the browser callback automatically. To register it without launching Studio:
 
 ```bash
@@ -150,11 +234,26 @@ cargo check --all-targets
 cargo run -- --help
 ```
 
+## Flatpak
+
+A Flatpak manifest is provided at
+`flatpak/io.github.checkpickerupper.RobloxStudioLinuxLauncher.yml`. It bundles one
+managed Kombucha Wine build and DXVK graphics layer, so Studio and
+`StudioMCP.exe` run inside the same sandbox and prefix. See `flatpak/README.md`
+for the build command and MCP invocation. For Flatpak MCP, keep the launcher GUI
+open while Studio and the AI client are connected; the external command enters
+that running app sandbox so the official MCP process can see the open Studio place.
+
 ## Current limits
 
 - Linux is not an officially supported Roblox platform.
 - Wine compatibility can change after any Roblox Studio update.
-- Embedded WebView2 login may fail under Wine; use the external browser callback.
+- Embedded WebView2 login depends on the current Wine/Studio build. The managed
+  compatibility settings use WebView2's SwiftShader renderer to avoid Wine's
+  hanging D3D11 WARP path; browser sign-in remains available as a backup.
 - Browser callback delivery depends on the Linux desktop handler. Windows Chrome cannot invoke a WSL `.desktop` entry.
-- Plugins, graphics, and play-testing still need real Linux testing.
+- Roblox Studio plugin windows depend on Wine, Vulkan, and display-driver
+  compatibility. The launcher GUI can use native Wayland, while Studio prefers
+  Wine's X11 driver through XWayland and uses native Wine Wayland only when X11
+  is unavailable.
 - Windows dual boot remains the reliable fallback for Studio work.

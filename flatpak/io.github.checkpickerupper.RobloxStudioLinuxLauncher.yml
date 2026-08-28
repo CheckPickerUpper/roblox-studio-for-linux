@@ -1,0 +1,72 @@
+app-id: io.github.checkpickerupper.RobloxStudioLinuxLauncher
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: roblox-studio-linux-launcher
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=x11
+  - --socket=wayland
+  - --device=all
+  - --allow=devel
+  # The external MCP command enters the already-running launcher sandbox so
+  # StudioMCP.exe and Roblox Studio share one process namespace and prefix.
+  - --talk-name=org.freedesktop.Flatpak
+  # Wine's browser-login fallback opens the host browser through the portal.
+  - --talk-name=org.freedesktop.portal.Desktop
+  - --env=XDG_DESKTOP_PORTAL_BACKEND=gtk
+  - --socket=pulseaudio
+  # The default Wine prefix lives below XDG_DATA_HOME. Home access also permits
+  # users to select an existing prefix or Studio installation in the GUI.
+  - --filesystem=home
+modules:
+  - name: roblox-studio-linux-launcher
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/roblox-studio-linux-launcher/cargo
+        CARGO_NET_OFFLINE: 'true'
+    build-commands:
+      - mkdir -p /app/kombucha
+      - cp -a kombucha/. /app/kombucha/
+      - install -Dm644 dxvk/x64/d3d8.dll /app/share/roblox-studio-linux-launcher/dxvk/x64/d3d8.dll
+      - install -Dm644 dxvk/x64/d3d9.dll /app/share/roblox-studio-linux-launcher/dxvk/x64/d3d9.dll
+      - install -Dm644 dxvk/x64/d3d10core.dll /app/share/roblox-studio-linux-launcher/dxvk/x64/d3d10core.dll
+      - install -Dm644 dxvk/x64/d3d11.dll /app/share/roblox-studio-linux-launcher/dxvk/x64/d3d11.dll
+      - install -Dm644 dxvk/x64/dxgi.dll /app/share/roblox-studio-linux-launcher/dxvk/x64/dxgi.dll
+      - install -Dm644 DXVK-LICENSE /app/share/licenses/roblox-studio-linux-launcher/DXVK-LICENSE
+      - install -Dm644 cargo/config .cargo/config.toml
+      - cargo --offline fetch --manifest-path Cargo.toml --locked
+      - cargo build --offline --release --locked
+      - install -Dm755 target/release/roblox-studio-linux-launcher /app/bin/roblox-studio-linux-launcher
+      - install -Dm644 assets/io.github.checkpickerupper.RobloxStudioLinuxLauncher.desktop /app/share/applications/io.github.checkpickerupper.RobloxStudioLinuxLauncher.desktop
+      - install -Dm644 assets/io.github.checkpickerupper.RobloxStudioLinuxLauncher.auth.desktop /app/share/applications/io.github.checkpickerupper.RobloxStudioLinuxLauncher.auth.desktop
+      - install -Dm644 assets/io.github.checkpickerupper.RobloxStudioLinuxLauncher.png /app/share/icons/hicolor/512x512/apps/io.github.checkpickerupper.RobloxStudioLinuxLauncher.png
+      - install -Dm644 assets/io.github.checkpickerupper.RobloxStudioLinuxLauncher.metainfo.xml /app/share/metainfo/io.github.checkpickerupper.RobloxStudioLinuxLauncher.metainfo.xml
+    sources:
+      - cargo-sources.json
+      - type: archive
+        url: https://github.com/vinegarhq/kombucha/releases/download/stable%2B20260824153321/kombucha-stable%2B20260824153321.tar.xz
+        sha256: fe14cdb03858a6c0d8b149774118d5d19b9e151d00322a62d6299113ea7b5fac
+        strip-components: 1
+        dest: kombucha
+      - type: archive
+        url: https://github.com/doitsujin/dxvk/releases/download/v2.7.1/dxvk-2.7.1.tar.gz
+        sha256: d85ce7c79f57ecd765aaa1b9e7007cb875e6fde9f6d331df799bce73d513ce87
+        strip-components: 1
+        dest: dxvk
+      - type: file
+        url: https://raw.githubusercontent.com/doitsujin/dxvk/v2.7.1/LICENSE
+        sha256: a5cb1a6ded7d2d7e92d550ba28edd21be2d1d4044662b399887351023e30ce64
+        dest-filename: DXVK-LICENSE
+      - type: dir
+        path: ..
+        skip:
+          - .codex-flatpak-*
+          - .flatpak-builder
+          - .git
+          - target
