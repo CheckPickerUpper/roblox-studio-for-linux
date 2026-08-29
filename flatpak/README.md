@@ -3,17 +3,30 @@
 The manifest in this directory packages the graphical launcher as
 `io.github.checkpickerupper.RobloxStudioLinuxLauncher`:
 
-## Install a published release
+## Install from the published repository
 
-Download the `.flatpak` file from the project's GitHub Releases page, then run:
+Add the signed repository and install the launcher by app ID:
 
 ```bash
-flatpak install --user ./RobloxStudioLinuxLauncher-0.1.0-x86_64.flatpak
+flatpak remote-add --user --if-not-exists roblox-studio-linux-launcher \
+  https://checkpickerupper.github.io/roblox-studio-for-linux/RobloxStudioLinuxLauncher.flatpakrepo
+flatpak install --user roblox-studio-linux-launcher \
+  io.github.checkpickerupper.RobloxStudioLinuxLauncher
 flatpak run io.github.checkpickerupper.RobloxStudioLinuxLauncher
 ```
 
-Published bundles currently support x86-64 Linux systems. They are distributed
-directly through GitHub rather than Flathub.
+Flatpak can update it normally after that:
+
+```bash
+flatpak update --user io.github.checkpickerupper.RobloxStudioLinuxLauncher
+```
+
+The
+[one-click `.flatpakref`](https://checkpickerupper.github.io/roblox-studio-for-linux/RobloxStudioLinuxLauncher.flatpakref)
+and standalone bundle on the GitHub Releases page install the same signed app.
+Published builds currently support x86-64 Linux systems. The launcher has its
+own repository because Flathub does not accept unofficial Wine packages for
+Windows applications.
 
 ## Build from a checkout
 

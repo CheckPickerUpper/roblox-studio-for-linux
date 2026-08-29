@@ -1,0 +1,159 @@
+name: Publish Flatpak repository
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install Flatpak repository tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes flatpak ostree
+
+      - name: Download the published Flatpak bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          mkdir --parents "${RUNNER_TEMP}/bundle"
+          if [[ -n "${RELEASE_TAG}" ]]; then
+            gh release download "${RELEASE_TAG}" --pattern '*.flatpak' --dir "${RUNNER_TEMP}/bundle"
+          else
+            gh release download --pattern '*.flatpak' --dir "${RUNNER_TEMP}/bundle"
+          fi
+
+          mapfile -t bundles < <(find "${RUNNER_TEMP}/bundle" -maxdepth 1 -type f -name '*.flatpak')
+          if [[ ${#bundles[@]} -ne 1 ]]; then
+            echo "Expected exactly one .flatpak release asset, found ${#bundles[@]}." >&2
+            exit 1
+          fi
+          printf 'bundle=%s\n' "${bundles[0]}" >> "${GITHUB_ENV}"
+
+      - name: Import the repository signing key
+        id: signing-key
+        env:
+          FLATPAK_GPG_PRIVATE_KEY: ${{ secrets.FLATPAK_GPG_PRIVATE_KEY }}
+        run: |
+          gpg_home="${RUNNER_TEMP}/flatpak-gpg"
+          install --directory --mode 700 "${gpg_home}"
+          printf '%s\n' "${FLATPAK_GPG_PRIVATE_KEY}" | gpg --batch --homedir "${gpg_home}" --import
+          fingerprint=$(gpg --batch --homedir "${gpg_home}" --with-colons --list-secret-keys |
+            awk -F: '$1 == "fpr" { print $10; exit }')
+          if [[ -z "${fingerprint}" ]]; then
+            echo 'The Flatpak repository signing key is missing.' >&2
+            exit 1
+          fi
+          printf 'gpg_home=%s\n' "${gpg_home}" >> "${GITHUB_ENV}"
+          printf 'fingerprint=%s\n' "${fingerprint}" >> "${GITHUB_ENV}"
+
+      - name: Build the signed Flatpak repository
+        run: |
+          mkdir --parents public
+          ostree init --repo=public/repo --mode=archive-z2
+
+          gpg --batch --homedir "${gpg_home}" \
+            --output public/repository-signing-key.gpg \
+            --export "${fingerprint}"
+
+          flatpak build-import-bundle \
+            --gpg-sign="${fingerprint}" \
+            --gpg-homedir="${gpg_home}" \
+            --update-appstream \
+            public/repo \
+            "${bundle}"
+
+          flatpak build-update-repo \
+            --title='Roblox Studio Linux Launcher' \
+            --comment='Unofficial Linux launcher for Roblox Studio' \
+            --description='Signed Flatpak releases of Roblox Studio Linux Launcher.' \
+            --homepage='https://github.com/CheckPickerUpper/roblox-studio-for-linux' \
+            --icon='https://checkpickerupper.github.io/roblox-studio-for-linux/icon.png' \
+            --default-branch=master \
+            --gpg-import=public/repository-signing-key.gpg \
+            --gpg-sign="${fingerprint}" \
+            --gpg-homedir="${gpg_home}" \
+            public/repo
+
+          public_key=$(base64 --wrap=0 public/repository-signing-key.gpg)
+          cp assets/io.github.checkpickerupper.RobloxStudioLinuxLauncher.png public/icon.png
+
+          cat > public/RobloxStudioLinuxLauncher.flatpakrepo <<EOF
+          [Flatpak Repo]
+          Title=Roblox Studio Linux Launcher
+          Comment=Unofficial Linux launcher for Roblox Studio
+          Description=Signed Flatpak releases of Roblox Studio Linux Launcher.
+          Url=https://checkpickerupper.github.io/roblox-studio-for-linux/repo/
+          Homepage=https://github.com/CheckPickerUpper/roblox-studio-for-linux
+          Icon=https://checkpickerupper.github.io/roblox-studio-for-linux/icon.png
+          GPGKey=${public_key}
+          EOF
+
+          cat > public/RobloxStudioLinuxLauncher.flatpakref <<EOF
+          [Flatpak Ref]
+          Title=Roblox Studio Linux Launcher
+          Name=io.github.checkpickerupper.RobloxStudioLinuxLauncher
+          Branch=master
+          Url=https://checkpickerupper.github.io/roblox-studio-for-linux/repo/
+          IsRuntime=false
+          RuntimeRepo=https://dl.flathub.org/repo/flathub.flatpakrepo
+          SuggestRemoteName=roblox-studio-linux-launcher
+          Homepage=https://github.com/CheckPickerUpper/roblox-studio-for-linux
+          Icon=https://checkpickerupper.github.io/roblox-studio-for-linux/icon.png
+          GPGKey=${public_key}
+          EOF
+
+          cat > public/index.html <<'EOF'
+          <!doctype html>
+          <html lang="en">
+            <head>
+              <meta charset="utf-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1">
+              <title>Roblox Studio Linux Launcher Flatpak repository</title>
+            </head>
+            <body>
+              <main>
+                <img src="icon.png" width="96" height="96" alt="">
+                <h1>Roblox Studio Linux Launcher</h1>
+                <p>An unofficial, experimental launcher for running Roblox Studio on Linux through Wine.</p>
+                <p><a href="RobloxStudioLinuxLauncher.flatpakref">Install with Flatpak</a></p>
+                <p><a href="RobloxStudioLinuxLauncher.flatpakrepo">Add the Flatpak repository</a></p>
+                <p><a href="https://github.com/CheckPickerUpper/roblox-studio-for-linux">Source and documentation</a></p>
+              </main>
+            </body>
+          </html>
+          EOF
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

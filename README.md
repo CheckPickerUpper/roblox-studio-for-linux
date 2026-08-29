@@ -236,13 +236,27 @@ cargo run -- --help
 
 ## Flatpak
 
-A Flatpak manifest is provided at
-`flatpak/io.github.checkpickerupper.RobloxStudioLinuxLauncher.yml`. It bundles one
+Install the published app from its signed Flatpak repository:
+
+```bash
+flatpak remote-add --user --if-not-exists roblox-studio-linux-launcher \
+  https://checkpickerupper.github.io/roblox-studio-for-linux/RobloxStudioLinuxLauncher.flatpakrepo
+flatpak install --user roblox-studio-linux-launcher \
+  io.github.checkpickerupper.RobloxStudioLinuxLauncher
+```
+
+After installation, normal `flatpak update` commands deliver launcher updates.
+The one-click installer is
+[RobloxStudioLinuxLauncher.flatpakref](https://checkpickerupper.github.io/roblox-studio-for-linux/RobloxStudioLinuxLauncher.flatpakref),
+and the release page retains the standalone `.flatpak` bundle as a fallback.
+
+The manifest at
+`flatpak/io.github.checkpickerupper.RobloxStudioLinuxLauncher.yml` bundles one
 managed Kombucha Wine build and DXVK graphics layer, so Studio and
 `StudioMCP.exe` run inside the same sandbox and prefix. See `flatpak/README.md`
-for the build command and MCP invocation. For Flatpak MCP, keep the launcher GUI
-open while Studio and the AI client are connected; the external command enters
-that running app sandbox so the official MCP process can see the open Studio place.
+for source builds and MCP invocation. For Flatpak MCP, keep the launcher GUI open
+while Studio and the AI client are connected; the external command enters that
+running app sandbox so the official MCP process can see the open Studio place.
 
 ## Current limits
 
