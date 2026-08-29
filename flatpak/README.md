@@ -3,6 +3,20 @@
 The manifest in this directory packages the graphical launcher as
 `io.github.checkpickerupper.RobloxStudioLinuxLauncher`:
 
+## Install a published release
+
+Download the `.flatpak` file from the project's GitHub Releases page, then run:
+
+```bash
+flatpak install --user ./RobloxStudioLinuxLauncher-0.1.0-x86_64.flatpak
+flatpak run io.github.checkpickerupper.RobloxStudioLinuxLauncher
+```
+
+Published bundles currently support x86-64 Linux systems. They are distributed
+directly through GitHub rather than Flathub.
+
+## Build from a checkout
+
 ```bash
 flatpak install flathub \
   org.freedesktop.Sdk//25.08 \

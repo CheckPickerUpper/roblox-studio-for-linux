@@ -12,23 +12,28 @@ use crate::runtime::{
     create_wine_command, discover_studio_installation, exec_wine_stdio, resolve_wine_binary,
     StudioInstallation,
 };
+use rmcp::model::{
+    CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation, ProtocolVersion,
+};
+use rmcp::service::RunningService;
+use rmcp::{RoleClient, ServiceExt};
 use serde_json::{json, Map, Value};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::process::Child;
+use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 
 const ROBLOX_MCP_SERVER_NAME: &str = "Roblox_Studio";
 const MCP_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 const MCP_TOOL_LIST_TIMEOUT: Duration = Duration::from_secs(5);
 const MCP_STUDIO_ATTACH_RETRY_COUNT: usize = 33;
 const MCP_STUDIO_ATTACH_RETRY_DELAY: Duration = Duration::from_millis(250);
+const MCP_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
 const MCP_STDIO_ARGUMENT: &str = "--stdio";
 const MCP_VERBOSE_ARGUMENT: &str = "--verbose";
 const REQUIRED_TOOL_NAMES: [&str; 3] = [
@@ -36,7 +41,6 @@ const REQUIRED_TOOL_NAMES: [&str; 3] = [
     "get_studio_state",
     "search_game_tree",
 ];
-static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn serve_mcp(launcher_config: &LauncherConfig) -> Result<i32, LauncherError> {
     let invocation = ActiveStudioInvocation::process(
@@ -222,22 +226,6 @@ fn inspect_mcp_connection(
             });
         }
     };
-    let initialize_params = json!({
-        "protocolVersion": "2025-06-18",
-        "capabilities": {},
-        "clientInfo": {
-            "name": "RobloxStudioLinuxLauncher",
-            "version": env!("CARGO_PKG_VERSION")
-        }
-    });
-    let initialize = probe.request("initialize", initialize_params, MCP_PROBE_TIMEOUT)?;
-    if initialize.get("protocolVersion").is_none() {
-        return Err(LauncherError::McpProtocolFailure {
-            method: "initialize".to_owned(),
-            message: "the matching StudioMCP.exe returned no protocol version".to_owned(),
-        });
-    }
-    probe.notify("notifications/initialized", json!({}))?;
 
     let studio_ids = wait_for_studio_ids(
         || probe.call_tool("list_roblox_studios", json!({}), MCP_PROBE_TIMEOUT),
@@ -257,13 +245,7 @@ fn inspect_mcp_connection(
                     });
                 }
             };
-            let tools_result = probe.request("tools/list", json!({}), MCP_TOOL_LIST_TIMEOUT)?;
-            let tool_names = extract_tool_names(&tools_result).ok_or_else(|| {
-                LauncherError::McpProtocolFailure {
-                    method: "tools/list".to_owned(),
-                    message: "the response did not contain a tools array".to_owned(),
-                }
-            })?;
+            let tool_names = probe.list_tool_names(MCP_TOOL_LIST_TIMEOUT)?;
             for required_tool in REQUIRED_TOOL_NAMES {
                 if !tool_names.iter().any(|name| name == required_tool) {
                     return Err(LauncherError::McpProtocolFailure {
@@ -481,98 +463,123 @@ fn installation_is_inside_prefix(installation: &StudioInstallation) -> bool {
             .starts_with(installation.wine_prefix.join("drive_c"))
 }
 
+type StudioMcpService = RunningService<RoleClient, ClientInfo>;
+
 struct McpProbe {
+    runtime: Runtime,
+    service: StudioMcpService,
     child: Child,
-    stdin: ChildStdin,
-    events: Receiver<ProtocolEvent>,
 }
 
 impl McpProbe {
     fn start(installation: &StudioInstallation) -> Result<Self, LauncherError> {
+        let runtime = RuntimeBuilder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|source| LauncherError::McpRuntimeUnavailable {
+                message: format!("could not create the MCP task runtime: {source}"),
+            })?;
         let (mut command, _) =
             create_wine_command(&installation.wine_binary, &installation.wine_prefix, &[])?;
         command
             .arg(&installation.mcp_executable)
             .arg(MCP_STDIO_ARGUMENT)
-            .arg(MCP_VERBOSE_ARGUMENT)
+            .arg(MCP_VERBOSE_ARGUMENT);
+        let mut tokio_command = tokio::process::Command::from(command);
+        tokio_command
+            .kill_on_drop(true)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = command.spawn().map_err(|source| LauncherError::RunWine {
-            program: installation.wine_binary.display().to_string(),
-            source,
-        })?;
-        let stdout = match child.stdout.take() {
-            Some(stdout) => stdout,
-            None => {
-                stop_probe_process(&mut child);
-                return Err(LauncherError::McpProtocolFailure {
+        let wine_program = installation.wine_binary.display().to_string();
+        let (service, child) = runtime.block_on(async move {
+            let mut child = tokio_command
+                .spawn()
+                .map_err(|source| LauncherError::RunWine {
+                    program: wine_program,
+                    source,
+                })?;
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| LauncherError::McpProtocolFailure {
                     method: "spawn".to_owned(),
                     message: "StudioMCP stdout was not available".to_owned(),
-                });
-            }
-        };
-        let stderr = match child.stderr.take() {
-            Some(stderr) => stderr,
-            None => {
-                stop_probe_process(&mut child);
-                return Err(LauncherError::McpProtocolFailure {
-                    method: "spawn".to_owned(),
-                    message: "StudioMCP stderr was not available".to_owned(),
-                });
-            }
-        };
-        let stdin = match child.stdin.take() {
-            Some(stdin) => stdin,
-            None => {
-                stop_probe_process(&mut child);
-                return Err(LauncherError::McpProtocolFailure {
+                })?;
+            let stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| LauncherError::McpProtocolFailure {
                     method: "spawn".to_owned(),
                     message: "StudioMCP stdin was not available".to_owned(),
+                })?;
+            if let Some(mut stderr) = child.stderr.take() {
+                tokio::spawn(async move {
+                    if let Err(error) = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await {
+                        tracing::debug!(error = %error, "Could not drain StudioMCP stderr");
+                    }
                 });
             }
-        };
-        let (sender, events) = mpsc::channel();
-        spawn_stdout_reader(stdout, sender);
-        spawn_stderr_reader(stderr);
+            let client_information = ClientInfo::new(
+                ClientCapabilities::default(),
+                Implementation::new("RobloxStudioLinuxLauncher", env!("CARGO_PKG_VERSION")),
+            )
+            .with_protocol_version(ProtocolVersion::V_2025_06_18);
+            let service = match tokio::time::timeout(
+                MCP_PROBE_TIMEOUT,
+                client_information.serve((stdout, stdin)),
+            )
+            .await
+            {
+                Ok(Ok(service)) => service,
+                Ok(Err(error)) => {
+                    let _ = stop_mcp_child(&mut child).await;
+                    return Err(LauncherError::McpProtocolFailure {
+                        method: "initialize".to_owned(),
+                        message: error.to_string(),
+                    });
+                }
+                Err(_) => {
+                    let _ = stop_mcp_child(&mut child).await;
+                    return Err(LauncherError::McpProtocolTimeout {
+                        method: "initialize".to_owned(),
+                        timeout_seconds: MCP_PROBE_TIMEOUT.as_secs(),
+                    });
+                }
+            };
+            Ok((service, child))
+        })?;
         tracing::debug!(
             studio = %installation.studio_executable.display(),
             mcp = %installation.mcp_executable.display(),
             "Started MCP probe process"
         );
         Ok(Self {
+            runtime,
+            service,
             child,
-            stdin,
-            events,
         })
     }
 
-    fn request(
-        &mut self,
-        method: &str,
-        params: Value,
-        timeout: Duration,
-    ) -> Result<Value, LauncherError> {
-        let request_id = next_request_id();
-        let message = json!({
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "method": method,
-            "params": params
-        });
-        write_stdio_message(&mut self.stdin, message)?;
-        wait_for_protocol_response(&self.events, request_id, method, timeout)
-    }
-
-    fn notify(&mut self, method: &str, params: Value) -> Result<(), LauncherError> {
-        write_stdio_message(
-            &mut self.stdin,
-            json!({
-                "jsonrpc": "2.0",
-                "method": method,
-                "params": params
+    fn list_tool_names(&mut self, timeout: Duration) -> Result<Vec<String>, LauncherError> {
+        let service = &self.service;
+        let response = self
+            .runtime
+            .block_on(async { tokio::time::timeout(timeout, service.list_all_tools()).await });
+        match response {
+            Ok(Ok(tools)) => Ok(tools
+                .into_iter()
+                .map(|tool| tool.name.into_owned())
+                .collect()),
+            Ok(Err(error)) => Err(LauncherError::McpProtocolFailure {
+                method: "tools/list".to_owned(),
+                message: error.to_string(),
             }),
-        )
+            Err(_) => Err(LauncherError::McpProtocolTimeout {
+                method: "tools/list".to_owned(),
+                timeout_seconds: timeout.as_secs(),
+            }),
+        }
     }
 
     fn call_tool(
@@ -581,184 +588,79 @@ impl McpProbe {
         arguments: Value,
         timeout: Duration,
     ) -> Result<ToolCallReply, LauncherError> {
-        let result = self.request(
-            "tools/call",
-            json!({ "name": tool_name, "arguments": arguments }),
-            timeout,
-        )?;
-        if result.get("isError").and_then(Value::as_bool) == Some(true) {
-            return Ok(ToolCallReply::Error(extract_error_text(&result)));
-        }
-        Ok(ToolCallReply::Success(result))
-    }
-}
-
-fn wait_for_protocol_response(
-    events: &Receiver<ProtocolEvent>,
-    request_id: u64,
-    method: &str,
-    timeout: Duration,
-) -> Result<Value, LauncherError> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(LauncherError::McpProtocolTimeout {
-                method: method.to_owned(),
-                timeout_seconds: timeout.as_secs(),
-            });
-        }
-        match events.recv_timeout(remaining) {
-            Ok(ProtocolEvent::Message(message)) => {
-                if message.get("id") == Some(&json!(request_id)) {
-                    return protocol_result(message, method);
-                }
-            }
-            Ok(ProtocolEvent::Ended) => {
+        let arguments = match arguments {
+            Value::Object(arguments) => arguments,
+            _ => {
                 return Err(LauncherError::McpProtocolFailure {
-                    method: method.to_owned(),
-                    message: "StudioMCP closed its stdio stream".to_owned(),
+                    method: format!("tools/call:{tool_name}"),
+                    message: "tool arguments were not a JSON object".to_owned(),
                 });
             }
-            Ok(ProtocolEvent::Failed(message)) => {
+        };
+        let parameters = CallToolRequestParams::new(tool_name.to_owned()).with_arguments(arguments);
+        let service = &self.service;
+        let response = self
+            .runtime
+            .block_on(async { tokio::time::timeout(timeout, service.call_tool(parameters)).await });
+        let result = match response {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => {
                 return Err(LauncherError::McpProtocolFailure {
-                    method: method.to_owned(),
-                    message,
+                    method: format!("tools/call:{tool_name}"),
+                    message: error.to_string(),
                 });
             }
-            Err(RecvTimeoutError::Timeout) => {
+            Err(_) => {
                 return Err(LauncherError::McpProtocolTimeout {
-                    method: method.to_owned(),
+                    method: format!("tools/call:{tool_name}"),
                     timeout_seconds: timeout.as_secs(),
                 });
             }
-            Err(RecvTimeoutError::Disconnected) => {
-                return Err(LauncherError::McpProtocolFailure {
-                    method: method.to_owned(),
-                    message: "the StudioMCP reader stopped unexpectedly".to_owned(),
-                });
-            }
+        };
+        let is_error = result.is_error == Some(true);
+        let document =
+            serde_json::to_value(result).map_err(|source| LauncherError::McpProtocolFailure {
+                method: format!("tools/call:{tool_name}"),
+                message: format!("could not read the tool response: {source}"),
+            })?;
+        match is_error {
+            true => Ok(ToolCallReply::Error(extract_error_text(&document))),
+            false => Ok(ToolCallReply::Success(document)),
         }
     }
 }
 
 impl Drop for McpProbe {
     fn drop(&mut self) {
-        stop_probe_process(&mut self.child);
+        let service = &mut self.service;
+        let child = &mut self.child;
+        self.runtime.block_on(async {
+            match tokio::time::timeout(MCP_SHUTDOWN_TIMEOUT, service.close()).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    tracing::debug!(error = %error, "MCP service shutdown task failed");
+                }
+                Err(_) => {
+                    tracing::debug!("MCP service did not close before the shutdown deadline");
+                }
+            }
+            if let Err(error) = stop_mcp_child(child).await {
+                tracing::debug!(error = %error, "Could not stop MCP probe process cleanly");
+            }
+        });
     }
 }
 
-fn stop_probe_process(child: &mut Child) {
-    match child.try_wait() {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            if let Err(error) = child.kill() {
-                tracing::debug!(error = %error, "Could not stop MCP probe process");
-            }
-            if let Err(error) = child.wait() {
-                tracing::debug!(error = %error, "Could not collect MCP probe process");
-            }
-        }
-        Err(error) => tracing::debug!(error = %error, "Could not inspect MCP probe process"),
+async fn stop_mcp_child(child: &mut Child) -> std::io::Result<()> {
+    if child.try_wait()?.is_none() {
+        child.kill().await?;
     }
-}
-
-enum ProtocolEvent {
-    Message(Value),
-    Ended,
-    Failed(String),
+    Ok(())
 }
 
 enum ToolCallReply {
     Success(Value),
     Error(String),
-}
-
-fn spawn_stdout_reader(stdout: impl Read + Send + 'static, sender: Sender<ProtocolEvent>) {
-    thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        loop {
-            let mut line = String::new();
-            match reader.read_line(&mut line) {
-                Ok(0) => {
-                    send_protocol_event(&sender, ProtocolEvent::Ended);
-                    break;
-                }
-                Ok(_) => match serde_json::from_str::<Value>(line.trim()) {
-                    Ok(message) => send_protocol_event(&sender, ProtocolEvent::Message(message)),
-                    Err(error) => send_protocol_event(
-                        &sender,
-                        ProtocolEvent::Failed(format!("invalid JSON from StudioMCP: {error}")),
-                    ),
-                },
-                Err(error) => {
-                    send_protocol_event(
-                        &sender,
-                        ProtocolEvent::Failed(format!("could not read StudioMCP stdout: {error}")),
-                    );
-                    break;
-                }
-            }
-        }
-    });
-}
-
-fn spawn_stderr_reader(stderr: impl Read + Send + 'static) {
-    thread::spawn(move || {
-        let mut reader = BufReader::new(stderr);
-        let mut buffer = String::new();
-        match reader.read_to_string(&mut buffer) {
-            Ok(_) => {}
-            Err(error) => tracing::debug!(error = %error, "Could not drain StudioMCP stderr"),
-        }
-    });
-}
-
-fn send_protocol_event(sender: &Sender<ProtocolEvent>, event: ProtocolEvent) {
-    if let Err(error) = sender.send(event) {
-        tracing::debug!(error = %error, "MCP probe event receiver stopped");
-    }
-}
-
-fn write_stdio_message(stdin: &mut ChildStdin, message: Value) -> Result<(), LauncherError> {
-    let serialized =
-        serde_json::to_string(&message).map_err(|source| LauncherError::McpProtocolFailure {
-            method: "write".to_owned(),
-            message: source.to_string(),
-        })?;
-    stdin
-        .write_all(serialized.as_bytes())
-        .and_then(|_| stdin.write_all(b"\n"))
-        .and_then(|_| stdin.flush())
-        .map_err(|source| LauncherError::McpProtocolFailure {
-            method: "write".to_owned(),
-            message: source.to_string(),
-        })
-}
-
-fn protocol_result(message: Value, method: &str) -> Result<Value, LauncherError> {
-    let object = match message {
-        Value::Object(object) => object,
-        _ => {
-            return Err(LauncherError::McpProtocolFailure {
-                method: method.to_owned(),
-                message: "the response was not a JSON object".to_owned(),
-            });
-        }
-    };
-    if let Some(error) = object.get("error") {
-        return Err(LauncherError::McpProtocolFailure {
-            method: method.to_owned(),
-            message: extract_error_text(error),
-        });
-    }
-    match object.get("result") {
-        Some(result) => Ok(result.clone()),
-        None => Err(LauncherError::McpProtocolFailure {
-            method: method.to_owned(),
-            message: "the response contained neither result nor error".to_owned(),
-        }),
-    }
 }
 
 fn extract_error_text(value: &Value) -> String {
@@ -909,21 +811,6 @@ where
         tracing::debug!(%error, "StudioMCP could not list Studio sessions");
     }
     Ok(Vec::new())
-}
-
-fn extract_tool_names(result: &Value) -> Option<Vec<String>> {
-    let document = extract_tool_document(result);
-    let tools = document.get("tools")?.as_array()?;
-    let mut names = Vec::new();
-    for tool in tools {
-        let name = tool.get("name")?.as_str()?.to_owned();
-        names.push(name);
-    }
-    Some(names)
-}
-
-fn next_request_id() -> u64 {
-    NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 enum StudioProcessPresence {
@@ -1100,55 +987,18 @@ fn assistant_restart_hint(wine_prefix: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_studio_ids, extract_tool_names, log_indicates_sign_in_required,
-        search_game_tree_arguments, setup_client_configuration, wait_for_protocol_response,
-        wait_for_studio_ids, ProtocolEvent, ToolCallReply,
+        extract_studio_ids, log_indicates_sign_in_required, search_game_tree_arguments,
+        setup_client_configuration, stop_mcp_child, wait_for_studio_ids, ToolCallReply,
     };
     use behave::prelude::*;
     use serde_json::{json, Value};
     use std::collections::VecDeque;
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::mpsc;
-    use std::thread;
-    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     behave! {
         "Reading the open Studio connection" {
-            "unrelated protocol messages keep arriving" {
-                "still stops at the request's one total deadline" {
-                    let (sender, events) = mpsc::channel();
-                    let producer = thread::spawn(move || {
-                        let started = Instant::now();
-                        while started.elapsed() < Duration::from_millis(200) {
-                            if sender
-                                .send(ProtocolEvent::Message(json!({"id": 999_u64})))
-                                .is_err()
-                            {
-                                break;
-                            }
-                            thread::sleep(Duration::from_millis(5));
-                        }
-                    });
-                    let started = Instant::now();
-                    let result = wait_for_protocol_response(
-                        &events,
-                        1,
-                        "test/request",
-                        Duration::from_millis(40),
-                    );
-                    let elapsed = started.elapsed();
-                    drop(events);
-                    expect!(producer.join()).to_be_ok()?;
-                    expect!(matches!(
-                        result,
-                        Err(crate::error::LauncherError::McpProtocolTimeout { .. })
-                    ))
-                    .to_be_true()?;
-                    expect!(elapsed < Duration::from_millis(120)).to_be_true()?;
-                }
-            }
-
             "keeps the Studio ID returned by the server" {
                 let response = json!({
                     "content": [{
@@ -1158,21 +1008,6 @@ mod tests {
                 });
                 expect!(extract_studio_ids(&response))
                     .to_equal(Some(vec!["studio-one".to_owned()]))?;
-            }
-
-            "recognizes the tools needed to inspect a place" {
-                let response = json!({
-                    "tools": [
-                        {"name": "list_roblox_studios"},
-                        {"name": "get_studio_state"},
-                        {"name": "search_game_tree"}
-                    ]
-                });
-                expect!(extract_tool_names(&response)).to_equal(Some(vec![
-                    "list_roblox_studios".to_owned(),
-                    "get_studio_state".to_owned(),
-                    "search_game_tree".to_owned(),
-                ]))?;
             }
 
             "uses Studio's focused DataModel when inspecting the game tree" {
@@ -1312,6 +1147,33 @@ mod tests {
                 expect!(parsed["metadata"]["keep"].clone()).to_equal(Value::Bool(true))?;
                 expect!(client_config.with_extension("json.bak").is_file()).to_be_true()?;
                 expect!(fs::remove_dir_all(test_root)).to_be_ok()?;
+            }
+        }
+
+        "Stopping an MCP child process" {
+            "waits until the process is gone" {
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        expect!(format!("the test runtime failed: {error}")).to_be_empty()?;
+                        return Ok(());
+                    }
+                };
+                let mut command = tokio::process::Command::new("sleep");
+                command.arg("30").kill_on_drop(true);
+                let mut child = match runtime.block_on(async { command.spawn() }) {
+                    Ok(child) => child,
+                    Err(error) => {
+                        expect!(format!("the test process failed: {error}")).to_be_empty()?;
+                        return Ok(());
+                    }
+                };
+
+                expect!(runtime.block_on(stop_mcp_child(&mut child))).to_be_ok()?;
+                expect!(child.try_wait()?.is_some()).to_be_true()?;
             }
         }
     }
