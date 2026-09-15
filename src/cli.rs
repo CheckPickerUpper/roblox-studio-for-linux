@@ -756,7 +756,15 @@ fn studio_runtime_plan(
     launcher_config: &LauncherConfig,
     login_mode: StudioLoginMode,
 ) -> StudioRuntimePlan {
-    StudioRuntimePlan::new(login_mode, studio_gpu(launcher_config.gpu_preference))
+    let gpu = studio_gpu(launcher_config.gpu_preference);
+    if let StudioGpu::DiscreteUnusable { name, failure } = &gpu {
+        tracing::warn!(
+            gpu = %name,
+            reason = %failure,
+            "The discrete GPU is unusable; Studio renders on the system default GPU"
+        );
+    }
+    StudioRuntimePlan::new(login_mode, gpu)
 }
 
 fn register_auth_handler_best_effort() {
