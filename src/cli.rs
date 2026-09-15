@@ -60,7 +60,7 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         installer: Option<PathBuf>,
     },
-    /// Launch the newest installed Studio executable.
+    /// Ensure the current Studio deployment is installed, then launch it.
     Launch {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         studio_arguments: Vec<String>,
@@ -605,24 +605,13 @@ fn launch_latest_studio(
         }
     };
 
-    let studio_installation = match select_studio_installation(
-        &wine_path,
-        &launcher_config.wine_prefix,
-        launcher_config.studio_executable.as_deref(),
-    )? {
-        Some(installation) => installation,
-        None => {
-            tracing::error!("RobloxStudioBeta.exe was not found; run install first");
-            return Ok(INVALID_ARGUMENT_EXIT_CODE);
-        }
-    };
-    let studio_executable = studio_installation.studio_executable;
-
     let exit_code = configure_wine_prefix(&wine_path, &launcher_config.wine_prefix)?;
     if exit_code != SUCCESS_EXIT_CODE {
         tracing::error!(exit_code, "Wine prefix Windows version setup failed");
         return Ok(exit_code);
     }
+
+    let studio_executable = install_latest_studio(&launcher_config.wine_prefix)?;
 
     let browser_login_minimum_visit_time =
         if !is_auth_callback && plan.login_mode() == StudioLoginMode::ExternalBrowser {
