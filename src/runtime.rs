@@ -1,6 +1,7 @@
 use crate::config::StudioLoginMode;
 use crate::durable_file::replace_file;
 use crate::error::LauncherError;
+use crate::graphics::StudioGpu;
 use ring::digest::{Context as DigestContext, SHA256};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
@@ -57,37 +58,38 @@ const MICROSOFT_ROOT_CERTIFICATE: &str = include_str!("../assets/microsoft-root-
 const WEBVIEW2_DIGEST_BUFFER_SIZE: usize = 1024 * 1024;
 
 /// Owns the complete login/runtime choice for one Studio launch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StudioRuntimePlan {
     login_mode: StudioLoginMode,
+    gpu: StudioGpu,
 }
 
 impl StudioRuntimePlan {
-    pub(crate) const fn new(login_mode: StudioLoginMode) -> Self {
-        Self { login_mode }
+    pub(crate) const fn new(login_mode: StudioLoginMode, gpu: StudioGpu) -> Self {
+        Self { login_mode, gpu }
     }
 
-    pub(crate) const fn login_mode(self) -> StudioLoginMode {
+    pub(crate) const fn login_mode(&self) -> StudioLoginMode {
         self.login_mode
     }
 
-    const fn windows_version(self) -> &'static str {
+    const fn windows_version(&self) -> &'static str {
         "win8"
     }
 
-    const fn browser_arguments(self) -> &'static str {
+    const fn browser_arguments(&self) -> &'static str {
         "--use-angle=swiftshader"
     }
 
-    const fn wine_graphics_backend(self) -> &'static str {
+    const fn wine_graphics_backend(&self) -> &'static str {
         "renderer=vulkan"
     }
 
-    const fn wine_dll_overrides(self) -> &'static str {
+    const fn wine_dll_overrides(&self) -> &'static str {
         "d3d9,d3d10core,d3d11,dxgi=n,b;dxdiagn,winemenubuilder.exe,mscoree,mshtml="
     }
 
-    const fn webview2_version(self) -> &'static str {
+    const fn webview2_version(&self) -> &'static str {
         PINNED_WEBVIEW2_VERSION
     }
 }
@@ -461,7 +463,7 @@ fn wine_server_is_running(wine_binary: &Path, wine_prefix: &Path) -> Result<bool
 }
 
 fn configure_webview2_runtime(
-    plan: StudioRuntimePlan,
+    plan: &StudioRuntimePlan,
     wine_binary: &Path,
     wine_prefix: &Path,
 ) -> Result<i32, LauncherError> {
@@ -760,7 +762,7 @@ fn set_studio_client_boolean(
 }
 
 fn ensure_webview2_runtime(
-    plan: StudioRuntimePlan,
+    plan: &StudioRuntimePlan,
     wine_binary: &Path,
     wine_prefix: &Path,
 ) -> Result<i32, LauncherError> {
@@ -819,7 +821,7 @@ fn ensure_webview2_runtime(
 }
 
 fn configure_webview2_registration(
-    plan: StudioRuntimePlan,
+    plan: &StudioRuntimePlan,
     wine_binary: &Path,
     wine_prefix: &Path,
     runtime_version_directory: &Path,
@@ -1105,7 +1107,7 @@ fn verify_pinned_webview2_installer(installer: &Path) -> Result<(), LauncherErro
 }
 
 fn uninstall_incompatible_webview2_runtimes(
-    plan: StudioRuntimePlan,
+    plan: &StudioRuntimePlan,
     wine_binary: &Path,
     wine_prefix: &Path,
     runtime_directory: &Path,
@@ -1161,7 +1163,7 @@ fn uninstall_incompatible_webview2_runtimes(
 }
 
 pub(crate) fn prepare_studio_runtime(
-    plan: StudioRuntimePlan,
+    plan: &StudioRuntimePlan,
     wine_binary: &Path,
     wine_prefix: &Path,
     studio_executable: &Path,
@@ -1250,7 +1252,7 @@ fn install_dxvk_files(
 }
 
 pub(crate) fn run_studio_auth(
-    plan: StudioRuntimePlan,
+    plan: &StudioRuntimePlan,
     wine_binary: &Path,
     wine_prefix: &Path,
     studio_executable: &Path,
@@ -1371,7 +1373,7 @@ fn spawn_wine_command(mut command: Command, program: String) -> Result<i32, Laun
 }
 
 pub(crate) fn run_studio(
-    plan: StudioRuntimePlan,
+    plan: &StudioRuntimePlan,
     wine_binary: &Path,
     wine_prefix: &Path,
     studio_executable: &Path,
@@ -1416,7 +1418,7 @@ pub(crate) fn run_studio(
     spawn_wine_command(command, program)
 }
 
-fn configure_studio_environment(command: &mut Command, plan: StudioRuntimePlan) {
+fn configure_studio_environment(command: &mut Command, plan: &StudioRuntimePlan) {
     // These are the reference-tested Kombucha/WebView2 rendering settings.
     command.env(
         "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
@@ -1434,6 +1436,7 @@ fn configure_studio_environment(command: &mut Command, plan: StudioRuntimePlan) 
     command.env("WINEDLLOVERRIDES", wine_dll_overrides);
     command.env("DXVK_LOG_LEVEL", "warn");
     command.env("DXVK_LOG_PATH", "none");
+    plan.gpu.apply(command);
 }
 
 fn find_webview2_runtime_directory(
@@ -1572,6 +1575,7 @@ mod tests {
         WineGraphicsPreparation, MANAGED_DXVK_DLLS,
     };
     use crate::config::StudioLoginMode;
+    use crate::graphics::StudioGpu;
     use behave::prelude::*;
     use std::ffi::OsStr;
     use std::fs;
@@ -1737,7 +1741,7 @@ mod tests {
         "Rendering Studio's embedded login page" {
             "the WebView2 process compatibility profile" {
                 "uses the Windows version that avoids unsupported DirectComposition" {
-                    let plan = StudioRuntimePlan::new(StudioLoginMode::EmbeddedWebView);
+                    let plan = StudioRuntimePlan::new(StudioLoginMode::EmbeddedWebView, StudioGpu::SystemDefault);
                     expect!(plan.windows_version())
                         .to_equal("win8")?;
                 }
@@ -1746,8 +1750,8 @@ mod tests {
             "a Studio process prepared for the embedded login page" {
                 setup {
                     let mut studio_command = Command::new("wine");
-                    let plan = StudioRuntimePlan::new(StudioLoginMode::EmbeddedWebView);
-                    configure_studio_environment(&mut studio_command, plan);
+                    let plan = StudioRuntimePlan::new(StudioLoginMode::EmbeddedWebView, StudioGpu::SystemDefault);
+                    configure_studio_environment(&mut studio_command, &plan);
                     let browser_arguments = studio_command
                         .get_envs()
                         .find(|(name, _)| *name == OsStr::new(

@@ -17,6 +17,8 @@ finish-args:
   - --talk-name=org.freedesktop.Flatpak
   # Wine's browser-login fallback opens the host browser through the portal.
   - --talk-name=org.freedesktop.portal.Desktop
+  # switcheroo-control names the discrete GPU and the environment that selects it.
+  - --system-talk-name=net.hadess.SwitcherooControl
   - --env=XDG_DESKTOP_PORTAL_BACKEND=gtk
   - --socket=pulseaudio
   # Studio files live below XDG_DATA_HOME. Home access also permits launching

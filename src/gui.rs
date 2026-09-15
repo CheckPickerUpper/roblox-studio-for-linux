@@ -5,6 +5,7 @@ mod mcp_connection_panel;
 
 use crate::config::{load_config, LauncherConfig, StudioLoginMode};
 use crate::error::LauncherError;
+use crate::graphics::GpuPreference;
 use crate::mcp::generate_client_configuration;
 use command_completion::CommandCompletion;
 use eframe::egui;
@@ -175,6 +176,7 @@ struct LauncherApp {
     wine_prefix: String,
     studio_executable: String,
     login_mode: StudioLoginMode,
+    gpu_preference: GpuPreference,
     mcp_connection: McpConnectionPanel,
     last_action: LastActionPanel,
     logo_image: egui::ColorImage,
@@ -207,6 +209,7 @@ impl LauncherApp {
                 .map(|path| path.display().to_string())
                 .unwrap_or_default(),
             login_mode: config.login_mode,
+            gpu_preference: config.gpu_preference,
             mcp_connection: McpConnectionPanel::new(),
             last_action: LastActionPanel::ready(),
             logo_image,
@@ -273,6 +276,10 @@ impl LauncherApp {
             command.push("--clear-studio-executable".to_owned());
         }
         command.push(self.login_mode.configure_flag().to_owned());
+        command.extend([
+            "--gpu".to_owned(),
+            self.gpu_preference.config_value().to_owned(),
+        ]);
         self.start_operation(LauncherAction::SaveSettings, command);
     }
 
@@ -412,49 +419,74 @@ impl LauncherApp {
     }
 
     fn show_settings(&mut self, ui: &mut egui::Ui, palette: Palette) {
-        egui::CollapsingHeader::new(
-            egui::RichText::new("Sign-in settings")
-                .strong()
-                .color(palette.text),
-        )
-        .default_open(false)
-        .show(ui, |ui| {
-            ui.radio_value(
-                &mut self.login_mode,
-                StudioLoginMode::EmbeddedWebView,
-                "Inside Studio (recommended)",
-            );
-            ui.add(
+        egui::CollapsingHeader::new(egui::RichText::new("Settings").strong().color(palette.text))
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.radio_value(
+                    &mut self.login_mode,
+                    StudioLoginMode::EmbeddedWebView,
+                    "Inside Studio (recommended)",
+                );
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new("Opens sign-in inside Studio.").color(palette.muted),
+                    )
+                    .wrap(),
+                );
+                ui.radio_value(
+                    &mut self.login_mode,
+                    StudioLoginMode::ExternalBrowser,
+                    "Web browser (if Studio sign-in is blank)",
+                );
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new("Opens sign-in in your default browser.")
+                            .color(palette.muted),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(8.0);
+                ui.radio_value(
+                    &mut self.gpu_preference,
+                    GpuPreference::Discrete,
+                    "Discrete GPU (recommended)",
+                );
+                ui.add(
                 egui::Label::new(
-                    egui::RichText::new("Opens sign-in inside Studio.").color(palette.muted),
+                    egui::RichText::new(
+                        "Renders Studio on the dedicated graphics card when the computer has one.",
+                    )
+                    .color(palette.muted),
                 )
                 .wrap(),
             );
-            ui.radio_value(
-                &mut self.login_mode,
-                StudioLoginMode::ExternalBrowser,
-                "Web browser (if Studio sign-in is blank)",
-            );
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new("Opens sign-in in your default browser.")
+                ui.radio_value(
+                    &mut self.gpu_preference,
+                    GpuPreference::SystemDefault,
+                    "System default GPU",
+                );
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(
+                            "Renders Studio on the GPU that drives the main display.",
+                        )
                         .color(palette.muted),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(8.0);
+                if action_button(
+                    ui,
+                    "Save settings",
+                    self.operation.is_none(),
+                    false,
+                    palette,
                 )
-                .wrap(),
-            );
-            ui.add_space(8.0);
-            if action_button(
-                ui,
-                "Save sign-in setting",
-                self.operation.is_none(),
-                false,
-                palette,
-            )
-            .clicked()
-            {
-                self.save_settings();
-            }
-        });
+                .clicked()
+                {
+                    self.save_settings();
+                }
+            });
     }
 
     fn show_command_status(&mut self, ui: &mut egui::Ui, palette: Palette) {

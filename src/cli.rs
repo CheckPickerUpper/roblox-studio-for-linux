@@ -4,6 +4,7 @@ use crate::config::{
 use crate::deployment::install_latest_studio;
 use crate::desktop;
 use crate::error::LauncherError;
+use crate::graphics::{studio_gpu, GpuPreference, StudioGpu};
 use crate::mcp::{
     doctor_mcp, generate_client_configuration, serve_mcp, setup_client_configuration,
     McpDoctorOutput,
@@ -92,6 +93,26 @@ struct ConfigureArguments {
     /// Try Studio's embedded WebView2 login page.
     #[arg(long)]
     embedded_webview: bool,
+    /// GPU that renders Studio on computers with more than one.
+    #[arg(long, value_enum)]
+    gpu: Option<GpuArgument>,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum GpuArgument {
+    /// Render on the discrete GPU when one is present.
+    Discrete,
+    /// Render on the GPU that drives the boot display.
+    Default,
+}
+
+impl From<GpuArgument> for GpuPreference {
+    fn from(argument: GpuArgument) -> Self {
+        match argument {
+            GpuArgument::Discrete => Self::Discrete,
+            GpuArgument::Default => Self::SystemDefault,
+        }
+    }
 }
 
 impl ConfigureArguments {
@@ -190,6 +211,7 @@ pub fn run_launcher() -> Result<i32, LauncherError> {
                 configuration.studio_executable.map(expand_user_path),
                 configuration.clear_studio_executable,
                 login_mode,
+                configuration.gpu.map(GpuPreference::from),
             )
         }
         Command::Install { installer } => {
@@ -299,6 +321,30 @@ fn report_launcher_doctor(launcher_config: &LauncherConfig) -> Result<i32, Launc
         }
     }
 
+    match studio_gpu(launcher_config.gpu_preference) {
+        StudioGpu::Discrete { name, .. } => {
+            tracing::info!(gpu = %name, "Studio renders on the discrete GPU");
+        }
+        StudioGpu::SystemDefault => {
+            tracing::info!("Studio renders on the system default GPU by choice");
+        }
+        StudioGpu::NoDiscreteGpu => {
+            tracing::info!("No discrete GPU found; Studio renders on the system default GPU");
+        }
+        StudioGpu::SwitcherooUnavailable { message } => {
+            tracing::warn!(
+                error = %message,
+                "switcheroo-control is unavailable; Studio renders on the system default GPU"
+            );
+        }
+        StudioGpu::MalformedSwitcherooGpu { name } => {
+            tracing::warn!(
+                gpu = %name,
+                "switcheroo-control described this GPU incorrectly; Studio renders on the system default GPU"
+            );
+        }
+    }
+
     let selected_installation = match resolved_wine_binary {
         Some(wine_binary) => select_studio_installation(
             &wine_binary,
@@ -396,6 +442,7 @@ fn configure_launcher(
     studio_executable: Option<PathBuf>,
     clear_studio_executable: bool,
     login_mode: Option<StudioLoginMode>,
+    gpu_preference: Option<GpuPreference>,
 ) -> Result<i32, LauncherError> {
     let selected_wine_binary = match wine_binary {
         Some(value) => value,
@@ -420,6 +467,7 @@ fn configure_launcher(
         wine_prefix: selected_wine_prefix,
         studio_executable: selected_studio_executable,
         login_mode: selected_login_mode,
+        gpu_preference: gpu_preference.unwrap_or(launcher_config.gpu_preference),
     };
 
     save_config(&updated_config)?;
@@ -481,9 +529,9 @@ fn install_latest_studio_deployment(
         });
     }
 
-    let plan = StudioRuntimePlan::new(launcher_config.login_mode);
+    let plan = studio_runtime_plan(launcher_config, launcher_config.login_mode);
     let exit_code = prepare_studio_runtime(
-        plan,
+        &plan,
         &wine_path,
         &launcher_config.wine_prefix,
         &studio_executable,
@@ -559,9 +607,9 @@ fn install_studio_with_bootstrapper(
                 path = %path.display(),
                 "Latest installed Studio"
             );
-            let plan = StudioRuntimePlan::new(launcher_config.login_mode);
+            let plan = studio_runtime_plan(launcher_config, launcher_config.login_mode);
             let exit_code =
-                prepare_studio_runtime(plan, &wine_path, &launcher_config.wine_prefix, &path)?;
+                prepare_studio_runtime(&plan, &wine_path, &launcher_config.wine_prefix, &path)?;
             if exit_code == SUCCESS_EXIT_CODE {
                 tracing::warn!(
                     "Restart Roblox Studio after an install or update before testing its MCP connection"
@@ -581,7 +629,7 @@ fn launch_latest_studio(
     login_mode: StudioLoginMode,
     studio_arguments: &[String],
 ) -> Result<i32, LauncherError> {
-    let plan = StudioRuntimePlan::new(login_mode);
+    let plan = studio_runtime_plan(launcher_config, login_mode);
     let is_auth_callback = studio_arguments
         .first()
         .is_some_and(|argument| argument.starts_with("roblox-studio-auth:"));
@@ -637,7 +685,7 @@ fn launch_latest_studio(
         };
 
     let exit_code = prepare_studio_runtime(
-        plan,
+        &plan,
         &wine_path,
         &launcher_config.wine_prefix,
         &studio_executable,
@@ -659,7 +707,7 @@ fn launch_latest_studio(
     if is_auth_callback {
         tracing::info!("Launching Studio authentication callback");
         return run_studio_auth(
-            plan,
+            &plan,
             &wine_path,
             &launcher_config.wine_prefix,
             &studio_executable,
@@ -668,7 +716,7 @@ fn launch_latest_studio(
     }
 
     let exit_code = run_studio(
-        plan,
+        &plan,
         &wine_path,
         &launcher_config.wine_prefix,
         &studio_executable,
@@ -683,6 +731,13 @@ fn launch_latest_studio(
         }
         None => Ok(exit_code),
     }
+}
+
+fn studio_runtime_plan(
+    launcher_config: &LauncherConfig,
+    login_mode: StudioLoginMode,
+) -> StudioRuntimePlan {
+    StudioRuntimePlan::new(login_mode, studio_gpu(launcher_config.gpu_preference))
 }
 
 fn register_auth_handler_best_effort() {
