@@ -25,6 +25,13 @@ const BROWSER_LOGIN_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const WINE_SERVER_CHECK_TIMEOUT: Duration = Duration::from_millis(100);
 const WINE_SERVER_CHECK_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const WINE_SERVER_NOT_RUNNING_EXIT_CODE: i32 = 1;
+const DISTRIBUTION_WINESERVER_PATHS: [&str; 5] = [
+    "/usr/lib/x86_64-linux-gnu/wine/wineserver",
+    "/usr/lib/i386-linux-gnu/wine/wineserver",
+    "/usr/lib64/wine/wineserver",
+    "/usr/lib/wine/wineserver",
+    "/usr/libexec/wine/wineserver",
+];
 const MANAGED_WINE_BINARY: &str = "/app/kombucha/bin/wine";
 const WINE_DRIVERS_REGISTRY_KEY: &str = r"HKCU\Software\Wine\Drivers";
 const WINE_GRAPHICS_VALUE_NAME: &str = "Graphics";
@@ -390,13 +397,23 @@ fn restart_wine_server(wine_binary: &Path, wine_prefix: &Path) -> Result<i32, La
     Ok(0)
 }
 
+// Follows Wine's own lookup order: the WINESERVER override, the Wine binary's directory, PATH,
+// then the private library directories distributions install wineserver into.
 fn wine_server_path(wine_binary: &Path) -> PathBuf {
+    if let Some(configured) = env::var_os("WINESERVER").filter(|value| !value.is_empty()) {
+        return PathBuf::from(configured);
+    }
     let sibling = wine_binary.with_file_name("wineserver");
     if sibling.is_file() {
-        sibling
-    } else {
-        PathBuf::from("wineserver")
+        return sibling;
     }
+    env::var_os("PATH")
+        .into_iter()
+        .flat_map(|path_entries| env::split_paths(&path_entries).collect::<Vec<_>>())
+        .map(|directory| directory.join("wineserver"))
+        .chain(DISTRIBUTION_WINESERVER_PATHS.iter().map(PathBuf::from))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| PathBuf::from("wineserver"))
 }
 
 fn wine_server_is_running(wine_binary: &Path, wine_prefix: &Path) -> Result<bool, LauncherError> {
