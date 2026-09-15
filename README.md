@@ -10,7 +10,8 @@ Roblox officially supports Studio on Windows and macOS. This project does not pr
 - Checks whether Wine is available.
 - Installs the current official Windows Studio deployment directly into that prefix.
 - Keeps the official bootstrapper available as an explicit `--installer` fallback.
-- Finds the newest installed `RobloxStudioBeta.exe` on every launch.
+- Checks Roblox's current deployment on every launch and installs it before
+  Studio starts when the local prefix is missing that version.
 - Configures the Wine prefix for Studio, installs WebView2 when needed, and repairs the
   WebView2 registry entry that Wine's installer can leave missing.
 - Registers the `roblox-studio-auth:` browser callback with the Linux desktop.
@@ -100,7 +101,13 @@ features and did not prevent Studio's plugin-window swapchain failure in live
 testing. The launcher saves that driver order in the Wine prefix before Studio
 starts and restarts a stale Wine session once when the saved choice changes.
 
-Rerun `install` to check for and install a newer Studio deployment. Normal launches discover the newest installed Studio executable instead of pinning launches to an older version directory. The default data directory is `~/.local/share/roblox-studio-linux-launcher`. Use `--config` to keep the configuration somewhere else.
+Normal launches check Roblox's deployment endpoint and update the managed
+version directory automatically before Studio starts. The launcher's Wine
+prefix, including Studio sign-in data, is reused across versions. If the
+deployment endpoint or package downloads are unavailable, launch fails with
+the reason instead of opening an outdated Studio build. The default data
+directory is `~/.local/share/roblox-studio-linux-launcher`. Use `--config` to
+keep the configuration somewhere else.
 
 ## Connect an AI client through Studio MCP
 
