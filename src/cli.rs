@@ -4,7 +4,9 @@ use crate::config::{
 use crate::deployment::install_latest_studio;
 use crate::desktop;
 use crate::error::LauncherError;
-use crate::graphics::{studio_gpu, GpuPreference, StudioGpu};
+use crate::graphics::{
+    studio_gpu, vulkan_physical_device_count, GpuPreference, StudioGpu, VULKAN_PROBE_COMMAND,
+};
 use crate::mcp::{
     doctor_mcp, generate_client_configuration, serve_mcp, setup_client_configuration,
     McpDoctorOutput,
@@ -71,6 +73,9 @@ enum Command {
         #[command(subcommand)]
         action: McpAction,
     },
+    /// Exit successfully when Vulkan can see a GPU in this process's environment.
+    #[command(name = VULKAN_PROBE_COMMAND, hide = true)]
+    ProbeVulkan,
 }
 
 #[derive(ClapArgs)]
@@ -230,6 +235,10 @@ pub fn run_launcher() -> Result<i32, LauncherError> {
             let launcher_config = load_config(&config_path)?;
             run_mcp_action(&launcher_config, action)
         }
+        Command::ProbeVulkan => match vulkan_physical_device_count() {
+            0 => Ok(CHECK_FAILED_EXIT_CODE),
+            _ => Ok(SUCCESS_EXIT_CODE),
+        },
     }
 }
 
@@ -324,6 +333,16 @@ fn report_launcher_doctor(launcher_config: &LauncherConfig) -> Result<i32, Launc
     match studio_gpu(launcher_config.gpu_preference) {
         StudioGpu::Discrete { name, .. } => {
             tracing::info!(gpu = %name, "Studio renders on the discrete GPU");
+        }
+        StudioGpu::DiscreteUnusable { name, failure } => {
+            tracing::warn!(
+                gpu = %name,
+                reason = %failure,
+                "The discrete GPU is unusable; Studio renders on the system default GPU"
+            );
+            issues.push(format!(
+                "The discrete GPU {name} is unusable ({failure}); check its driver or reboot."
+            ));
         }
         StudioGpu::SystemDefault => {
             tracing::info!("Studio renders on the system default GPU by choice");

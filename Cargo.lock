@@ -2498,6 +2498,7 @@ dependencies = [
 name = "roblox-studio-linux-launcher"
 version = "0.1.0"
 dependencies = [
+ "ash",
  "atomic-write-file",
  "behave",
  "clap",

@@ -10,7 +10,7 @@ use std::time::Duration;
 pub(crate) const FLATPAK_APPLICATION_ID: &str =
     "io.github.checkpickerupper.RobloxStudioLinuxLauncher";
 const ENTERED_ENVIRONMENT: &str = "ROBLOX_LAUNCHER_FLATPAK_ENTERED";
-const STATUS_PATH_ENVIRONMENT: &str = "ROBLOX_LAUNCHER_FLATPAK_STATUS_PATH";
+pub(crate) const STATUS_PATH_ENVIRONMENT: &str = "ROBLOX_LAUNCHER_FLATPAK_STATUS_PATH";
 const FLATPAK_SPAWN_PATH: &str = "/usr/bin/flatpak-spawn";
 const ENTER_RETRY_COUNT: usize = 20;
 const ENTER_RETRY_DELAY: Duration = Duration::from_millis(250);
