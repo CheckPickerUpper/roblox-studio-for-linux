@@ -1,5 +1,6 @@
 use crate::durable_file::replace_file;
 use crate::error::LauncherError;
+use crate::graphics::GpuPreference;
 use crate::platform::xdg_data_home;
 use std::fs;
 use std::io::ErrorKind;
@@ -42,6 +43,7 @@ pub struct LauncherConfig {
     pub wine_prefix: PathBuf,
     pub studio_executable: Option<PathBuf>,
     pub(crate) login_mode: StudioLoginMode,
+    pub(crate) gpu_preference: GpuPreference,
 }
 
 pub fn default_config_path() -> PathBuf {
@@ -65,6 +67,7 @@ pub fn load_config(config_path: &Path) -> Result<LauncherConfig, LauncherError> 
     let mut wine_prefix = None;
     let mut studio_executable = None;
     let mut login_mode = None;
+    let mut gpu_preference = None;
 
     for (index, raw_line) in contents.lines().enumerate() {
         let line_number = index + 1;
@@ -105,6 +108,16 @@ pub fn load_config(config_path: &Path) -> Result<LauncherConfig, LauncherError> 
                 config_path,
                 line_number,
             )?,
+            ("graphics", "gpu") => {
+                if gpu_preference.is_some() {
+                    return Err(LauncherError::InvalidConfig {
+                        path: config_path.to_path_buf(),
+                        line: line_number,
+                        message: "Studio GPU is configured more than once".to_owned(),
+                    });
+                }
+                gpu_preference = Some(parse_gpu_preference(value, config_path, line_number)?);
+            }
             _ => {}
         }
     }
@@ -122,6 +135,7 @@ pub fn load_config(config_path: &Path) -> Result<LauncherConfig, LauncherError> 
         }),
         studio_executable,
         login_mode: login_mode.unwrap_or_default(),
+        gpu_preference: gpu_preference.unwrap_or_default(),
     })
 }
 
@@ -141,11 +155,12 @@ pub fn save_config(config: &LauncherConfig) -> Result<(), LauncherError> {
         .map(|path| path.display().to_string())
         .unwrap_or_default();
     let contents = format!(
-        "[wine]\nbinary = {}\nprefix = {}\n\n[studio]\nexecutable = {}\nlogin_mode = {}\n",
+        "[wine]\nbinary = {}\nprefix = {}\n\n[studio]\nexecutable = {}\nlogin_mode = {}\n\n[graphics]\ngpu = {}\n",
         config.wine_binary,
         config.wine_prefix.display(),
         executable,
         config.login_mode.config_value(),
+        config.gpu_preference.config_value(),
     );
     replace_file(&config.config_path, contents.as_bytes()).map_err(|source| {
         LauncherError::WriteConfig {
@@ -167,6 +182,22 @@ fn parse_login_mode(
             path: config_path.to_path_buf(),
             line: line_number,
             message: "login_mode must be embedded or browser".to_owned(),
+        }),
+    }
+}
+
+fn parse_gpu_preference(
+    value: &str,
+    config_path: &Path,
+    line_number: usize,
+) -> Result<GpuPreference, LauncherError> {
+    match value.to_ascii_lowercase().as_str() {
+        "discrete" => Ok(GpuPreference::Discrete),
+        "default" => Ok(GpuPreference::SystemDefault),
+        _ => Err(LauncherError::InvalidConfig {
+            path: config_path.to_path_buf(),
+            line: line_number,
+            message: "gpu must be discrete or default".to_owned(),
         }),
     }
 }
@@ -214,6 +245,7 @@ mod tests {
         load_config, parse_legacy_login_mode, parse_login_mode, save_config, LauncherConfig,
         StudioLoginMode,
     };
+    use crate::graphics::GpuPreference;
     use behave::prelude::*;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -241,6 +273,7 @@ mod tests {
                         wine_prefix: PathBuf::from("/tmp/roblox-studio-prefix"),
                         studio_executable: None,
                         login_mode: StudioLoginMode::EmbeddedWebView,
+                        gpu_preference: GpuPreference::Discrete,
                     };
                     save_config(&config)?;
                     let saved_config = fs::read_to_string(&config_path)?;
@@ -249,7 +282,7 @@ mod tests {
 
                 "writes one named login mode instead of a second boolean authority" {
                     expect!(saved_config).to_equal(
-                        "[wine]\nbinary = wine\nprefix = /tmp/roblox-studio-prefix\n\n[studio]\nexecutable = \nlogin_mode = embedded\n".to_owned(),
+                        "[wine]\nbinary = wine\nprefix = /tmp/roblox-studio-prefix\n\n[studio]\nexecutable = \nlogin_mode = embedded\n\n[graphics]\ngpu = discrete\n".to_owned(),
                     )?;
                 }
             }

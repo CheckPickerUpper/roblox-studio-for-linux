@@ -158,6 +158,20 @@ so Studio and MCP cannot accidentally come from different installations.
 
 Additional arguments after `launch` are passed to Studio.
 
+## Studio GPU
+
+On a computer with more than one GPU, such as a laptop with integrated and
+dedicated graphics, Studio renders on the discrete GPU by default. The launcher
+asks `switcheroo-control`, the desktop's GPU service, which GPU is discrete and
+which environment selects it, then starts Studio with that environment. Before
+each launch it checks that Vulkan can actually see that GPU. If the driver has
+crashed or its libraries do not match, Studio starts on the default GPU instead
+and `doctor` reports the problem.
+
+Use `configure --gpu default` to render on the GPU that drives the main display
+instead, and `configure --gpu discrete` to switch back. `doctor` names the GPU
+Studio will use, or explains why it falls back to the system default.
+
 ## Studio login
 
 The launcher installs the matching WebView2 runtime and uses Studio's own sign-in

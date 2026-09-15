@@ -6,6 +6,7 @@ mod deployment;
 mod desktop;
 mod durable_file;
 mod error;
+mod graphics;
 mod gui;
 mod mcp;
 mod platform;
