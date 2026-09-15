@@ -18,82 +18,68 @@ Roblox officially supports Studio on Windows and macOS. This project does not pr
 - Launches Studio through Wine and forwards Studio command-line arguments.
 - Connects AI clients to Roblox Studio's built-in MCP process without replacing it.
 - Verifies the matching Studio version, MCP executable, Wine prefix, and live Studio session.
-- Includes a desktop-entry template for a clickable launcher.
+- Includes a desktop entry for the Flatpak app.
 - Includes a graphical launcher with install, update, launch, MCP connection checks, diagnostics, and settings actions.
 
-## Dependencies
+## Official installation
 
-Required system software:
+The signed Flatpak repository is this project's official and only supported
+end-user installation. It includes the graphical launcher, the launcher's CLI,
+one managed Wine runtime, and the update path for the app and its compatibility
+components.
 
-- Linux
-- Rust stable and Cargo
-- Wine, installed through your Linux distribution
-- Winetricks with the `corefonts`, `vcrun2019`, and `dxvk` verbs available
-
-These dependencies describe the native Cargo installation. The Flatpak build
-contains one managed Kombucha Wine runtime and keeps its prefix inside the
-Flatpak data directory. It does not also include the `org.winehq.Wine` base.
-
-The launcher downloads and verifies the current Studio packages from Roblox's official deployment endpoints. It does not require a manually downloaded installer for the normal path.
-
-## Install from a checkout
-
-Install the launcher command:
+Install it from the published repository:
 
 ```bash
-cargo install --path .
-roblox-studio-linux-launcher doctor
+flatpak remote-add --user --if-not-exists roblox-studio-linux-launcher \
+  https://checkpickerupper.github.io/roblox-studio-for-linux/RobloxStudioLinuxLauncher.flatpakrepo
+flatpak install --user roblox-studio-linux-launcher \
+  io.github.checkpickerupper.RobloxStudioLinuxLauncher
+flatpak run io.github.checkpickerupper.RobloxStudioLinuxLauncher
 ```
 
-Open the graphical launcher with:
+The one-click installer is
+[RobloxStudioLinuxLauncher.flatpakref](https://checkpickerupper.github.io/roblox-studio-for-linux/RobloxStudioLinuxLauncher.flatpakref).
+Update the installed app with:
 
 ```bash
-roblox-studio-linux-launcher gui
+flatpak update --user io.github.checkpickerupper.RobloxStudioLinuxLauncher
 ```
 
-During development, run it without installing:
-
-```bash
-cargo run -- doctor
-```
+Do not install the launcher with `cargo install`, host Wine, or host
+Winetricks. Those commands are contributor/development tools, not another
+supported installation path.
 
 ## First run
 
-1. Install the Windows compatibility components into the launcher's prefix:
+1. Start the installed Flatpak from your desktop menu or with:
 
    ```bash
-   WINEPREFIX="$HOME/.local/share/roblox-studio-linux-launcher/wine" \
-     winetricks --unattended corefonts vcrun2019 dxvk
+   flatpak run io.github.checkpickerupper.RobloxStudioLinuxLauncher
    ```
 
-2. Install the current Studio deployment directly:
+2. Use **Install / update** in the GUI. The Flatpak manages the Wine
+   prefix and compatibility components for you.
 
-   ```bash
-   roblox-studio-linux-launcher install
-   ```
-3. Register the browser callback (the install command also does this):
-
-   ```bash
-   roblox-studio-linux-launcher register
-   ```
-
-4. Check what was installed:
-
-   ```bash
-   roblox-studio-linux-launcher doctor
-   ```
-
-5. Try launching Studio:
-
-   ```bash
-   roblox-studio-linux-launcher launch
-   ```
+3. Sign in through Studio and use **Launch Studio**. Normal launches check
+   Roblox's current deployment before opening Studio.
 
 The launcher uses Studio's own sign-in window by default. Its managed WebView2
 setup uses WebView2's built-in SwiftShader renderer instead of Wine's hanging
 D3D11 software path. If that window still cannot render on a particular system,
-use the Linux-browser backup with `roblox-studio-linux-launcher browser-login`,
-or save that choice with `roblox-studio-linux-launcher configure --browser-login`.
+use the Linux-browser backup with:
+
+```bash
+flatpak run --command=roblox-studio-linux-launcher \
+  io.github.checkpickerupper.RobloxStudioLinuxLauncher browser-login
+```
+
+or save that choice with:
+
+```bash
+flatpak run --command=roblox-studio-linux-launcher \
+  io.github.checkpickerupper.RobloxStudioLinuxLauncher configure --browser-login
+```
 
 On a Wayland desktop with XWayland available, Wine keeps its mature X11 window
 driver. The native Wine Wayland path currently lacks desktop icon and clipboard
@@ -102,12 +88,12 @@ testing. The launcher saves that driver order in the Wine prefix before Studio
 starts and restarts a stale Wine session once when the saved choice changes.
 
 Normal launches check Roblox's deployment endpoint and update the managed
-version directory automatically before Studio starts. The launcher's Wine
+version directory automatically before Studio starts. The Flatpak's Wine
 prefix, including Studio sign-in data, is reused across versions. If the
 deployment endpoint or package downloads are unavailable, launch fails with
-the reason instead of opening an outdated Studio build. The default data
-directory is `~/.local/share/roblox-studio-linux-launcher`. Use `--config` to
-keep the configuration somewhere else.
+the reason instead of opening an outdated Studio build. The Flatpak keeps its
+data under `~/.var/app/io.github.checkpickerupper.RobloxStudioLinuxLauncher/`.
+Advanced CLI commands are documented in [Flatpak packaging](flatpak/README.md).
 
 ## Connect an AI client through Studio MCP
 
@@ -122,20 +108,25 @@ server or use the old standalone MCP project.
    existing JSON file while preserving other servers and creating a backup:
 
    ```bash
-   roblox-studio-linux-launcher mcp setup \
-     --client-config ~/.config/your-client/mcp.json
+   flatpak run --command=roblox-studio-linux-launcher \
+     io.github.checkpickerupper.RobloxStudioLinuxLauncher \
+     mcp setup --client-config ~/.config/your-client/mcp.json
    ```
 
    To print a configuration without editing a file:
 
    ```bash
-   roblox-studio-linux-launcher mcp setup --print
+   flatpak run --command=roblox-studio-linux-launcher \
+     io.github.checkpickerupper.RobloxStudioLinuxLauncher \
+     mcp setup --print
    ```
 
 4. Restart the AI client, then verify the live connection:
 
    ```bash
-   roblox-studio-linux-launcher mcp doctor
+   flatpak run --command=roblox-studio-linux-launcher \
+     io.github.checkpickerupper.RobloxStudioLinuxLauncher \
+     mcp doctor
    ```
 
 `mcp doctor` checks `list_roblox_studios`, `get_studio_state`, and
@@ -150,13 +141,17 @@ stderr so protocol output stays clean.
 If Roblox changes the direct deployment service, a manually downloaded bootstrapper can still be run explicitly:
 
 ```bash
-roblox-studio-linux-launcher install --installer ~/Downloads/RobloxStudioLauncherBeta.exe
+flatpak run --command=roblox-studio-linux-launcher \
+  io.github.checkpickerupper.RobloxStudioLinuxLauncher \
+  install --installer ~/Downloads/RobloxStudioLauncherBeta.exe
 ```
 
 If Studio is installed outside the launcher's Wine prefix, you can configure it as a launch-only fallback:
 
 ```bash
-roblox-studio-linux-launcher configure --studio-executable /path/to/RobloxStudioBeta.exe
+flatpak run --command=roblox-studio-linux-launcher \
+  io.github.checkpickerupper.RobloxStudioLinuxLauncher \
+  configure --studio-executable /path/to/RobloxStudioBeta.exe
 ```
 
 The MCP commands do not use that outside-prefix fallback. They only connect to
@@ -174,8 +169,13 @@ launcher's registered desktop entry forwards that callback to the already-runnin
 Flatpak Studio sandbox. Browser mode verifies that handler and waits until the
 authorization page actually opens before reporting success.
 
-Use `configure --embedded-webview` to return to the normal in-Studio page after
-testing browser mode.
+Use this Flatpak command to return to the normal in-Studio page after testing
+browser mode:
+
+```bash
+flatpak run --command=roblox-studio-linux-launcher \
+  io.github.checkpickerupper.RobloxStudioLinuxLauncher configure --embedded-webview
+```
 
 On WSL, use a Linux browser inside WSL for this callback path. A Windows browser uses Windows' protocol registry and cannot invoke the WSL desktop entry.
 
@@ -219,21 +219,24 @@ Rust:
 
 ## Desktop launcher
 
-The GUI desktop entry is available at
-`assets/io.github.checkpickerupper.RobloxStudioLinuxLauncher.desktop`.
-The existing registered desktop entry remains dedicated to the `roblox-studio-auth:`
-browser callback, so browser login continues to work while the GUI is open from the
-desktop menu.
-
-`install` and `launch` register the browser callback automatically. To register it without launching Studio:
+The Flatpak installs the GUI desktop entry and registers the
+`roblox-studio-auth:` browser callback for the managed Studio sandbox.
+`Install / update` and `Launch Studio` register the callback
+automatically. To register it without launching Studio:
 
 ```bash
-roblox-studio-linux-launcher register
+flatpak run --command=roblox-studio-linux-launcher \
+  io.github.checkpickerupper.RobloxStudioLinuxLauncher register
 ```
 
-Registration writes a per-user desktop entry and refreshes the user MIME cache for `roblox-studio-auth:`. The committed file at `assets/roblox-studio-linux-launcher.desktop` is a template for desktop-menu integration; the generated entry contains the installed launcher's absolute path.
+Registration writes a per-user desktop entry and refreshes the user MIME cache
+for `roblox-studio-auth:`. There is no separate native desktop installation.
 
-## Development checks
+## Contributor development
+
+The Rust binary is an implementation detail bundled into the Flatpak. Source
+checkout commands are for contributors and debugging; they are not a supported
+end-user installation and do not provide the managed Flatpak runtime.
 
 ```bash
 cargo fmt --all
@@ -241,21 +244,15 @@ cargo check --all-targets
 cargo run -- --help
 ```
 
-## Flatpak
+Build and exercise the release-shaped package with the instructions in
+[flatpak/README.md](flatpak/README.md). Do not publish or distribute a native
+`cargo install` build as an alternative launcher.
 
-Install the published app from its signed Flatpak repository:
+## Flatpak package
 
-```bash
-flatpak remote-add --user --if-not-exists roblox-studio-linux-launcher \
-  https://checkpickerupper.github.io/roblox-studio-for-linux/RobloxStudioLinuxLauncher.flatpakrepo
-flatpak install --user roblox-studio-linux-launcher \
-  io.github.checkpickerupper.RobloxStudioLinuxLauncher
-```
-
-After installation, normal `flatpak update` commands deliver launcher updates.
-The one-click installer is
-[RobloxStudioLinuxLauncher.flatpakref](https://checkpickerupper.github.io/roblox-studio-for-linux/RobloxStudioLinuxLauncher.flatpakref),
-and the release page retains the standalone `.flatpak` bundle as a fallback.
+The published release page retains the standalone `.flatpak` bundle as a
+fallback for the same official Flatpak installation. It does not publish a
+native executable or native desktop package.
 
 The manifest at
 `flatpak/io.github.checkpickerupper.RobloxStudioLinuxLauncher.yml` bundles one

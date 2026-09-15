@@ -2,7 +2,8 @@
 name = "roblox-studio-linux-launcher"
 version = "0.1.1"
 edition = "2021"
-description = "An unofficial Linux launcher for the Windows build of Roblox Studio through Wine."
+description = "Internal launcher binary bundled by the official Roblox Studio Linux Flatpak."
+publish = false
 readme = "README.md"
 homepage = "https://github.com/CheckPickerUpper/roblox-studio-for-linux"
 repository = "https://github.com/CheckPickerUpper/roblox-studio-for-linux"

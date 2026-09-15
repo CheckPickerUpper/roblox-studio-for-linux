@@ -3,7 +3,11 @@
 The manifest in this directory packages the graphical launcher as
 `io.github.checkpickerupper.RobloxStudioLinuxLauncher`:
 
-## Install from the published repository
+## Official installation
+
+The signed Flatpak repository is this project's official and only supported
+end-user installation. The Cargo binary built by the manifest is an internal
+component of that app, not a second native installation.
 
 Add the signed repository and install the launcher by app ID:
 
@@ -28,7 +32,10 @@ Published builds currently support x86-64 Linux systems. The launcher has its
 own repository because Flathub does not accept unofficial Wine packages for
 Windows applications.
 
-## Build from a checkout
+## Contributor build (not an official installation)
+
+Use this path to develop or validate the Flatpak package. Do not use a native
+`cargo install` build as the user-facing launcher.
 
 ```bash
 flatpak install flathub \

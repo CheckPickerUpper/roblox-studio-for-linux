@@ -80,8 +80,8 @@ jobs:
 
           flatpak build-update-repo \
             --title='Roblox Studio Linux Launcher' \
-            --comment='Unofficial Linux launcher for Roblox Studio' \
-            --description='Signed Flatpak releases of Roblox Studio Linux Launcher.' \
+            --comment='Official signed Flatpak distribution for the launcher' \
+            --description='The official and only supported end-user installation for Roblox Studio Linux Launcher.' \
             --homepage='https://github.com/CheckPickerUpper/roblox-studio-for-linux' \
             --icon='https://checkpickerupper.github.io/roblox-studio-for-linux/icon.png' \
             --default-branch=master \
@@ -96,8 +96,8 @@ jobs:
           cat > public/RobloxStudioLinuxLauncher.flatpakrepo <<EOF
           [Flatpak Repo]
           Title=Roblox Studio Linux Launcher
-          Comment=Unofficial Linux launcher for Roblox Studio
-          Description=Signed Flatpak releases of Roblox Studio Linux Launcher.
+          Comment=Official signed Flatpak distribution for the launcher
+          Description=The official and only supported end-user installation for Roblox Studio Linux Launcher.
           Url=https://checkpickerupper.github.io/roblox-studio-for-linux/repo/
           Homepage=https://github.com/CheckPickerUpper/roblox-studio-for-linux
           Icon=https://checkpickerupper.github.io/roblox-studio-for-linux/icon.png
@@ -131,6 +131,7 @@ jobs:
                 <img src="icon.png" width="96" height="96" alt="">
                 <h1>Roblox Studio Linux Launcher</h1>
                 <p>An unofficial, experimental launcher for running Roblox Studio on Linux through Wine.</p>
+                <p>The signed Flatpak is the official and only supported end-user installation.</p>
                 <p><a href="RobloxStudioLinuxLauncher.flatpakref">Install with Flatpak</a></p>
                 <p><a href="RobloxStudioLinuxLauncher.flatpakrepo">Add the Flatpak repository</a></p>
                 <p><a href="https://github.com/CheckPickerUpper/roblox-studio-for-linux">Source and documentation</a></p>
